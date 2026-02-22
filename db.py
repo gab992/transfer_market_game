@@ -523,24 +523,33 @@ def capture_milestone_snapshot(conn, milestone_id: int) -> None:
         if milestone["snapshot_taken"]:
             raise ValueError("Snapshot has already been taken for this milestone.")
 
-        # Compute each participant's current team value
+        # Compute each participant's current team value and cash budget
         cur.execute("""
             SELECT
                 p.id AS participant_id,
+                p.budget,
                 COALESCE(SUM(pl.current_value), 0) AS team_value
             FROM participants p
             LEFT JOIN rosters r  ON r.participant_id = p.id
             LEFT JOIN players pl ON pl.id = r.player_id
-            GROUP BY p.id
+            GROUP BY p.id, p.budget
         """)
         snapshots = cur.fetchall()
 
-        # Insert one row per participant
+        # Insert one row per participant (including their budget at this moment)
         for snap in snapshots:
             cur.execute("""
-                INSERT INTO milestone_snapshots (milestone_id, participant_id, team_value)
+                INSERT INTO milestone_snapshots (milestone_id, participant_id, team_value, budget)
+                VALUES (%s, %s, %s, %s)
+            """, (milestone_id, snap["participant_id"], snap["team_value"], snap["budget"]))
+
+        # Record every player's current value for per-player delta tracking
+        cur.execute("SELECT id, current_value FROM players")
+        for player in cur.fetchall():
+            cur.execute("""
+                INSERT INTO player_value_snapshots (milestone_id, player_id, value)
                 VALUES (%s, %s, %s)
-            """, (milestone_id, snap["participant_id"], snap["team_value"]))
+            """, (milestone_id, player["id"], player["current_value"]))
 
         # Mark snapshot as taken
         cur.execute(
@@ -616,6 +625,68 @@ def get_milestone_results(conn, milestone_id: int) -> list[dict]:
         })
 
     return results
+
+
+def get_last_milestone_player_values(conn) -> tuple[dict | None, dict]:
+    """
+    Return the per-player values from the most recently snapshotted milestone.
+
+    Returns:
+        A tuple of:
+          - milestone info dict with keys (id, name, date), or None if no
+            completed milestone exists.
+          - a dict mapping player_id (int) -> value (int) at that milestone.
+            Empty dict if no completed milestone exists.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, name, date
+            FROM milestones
+            WHERE snapshot_taken = TRUE
+            ORDER BY date DESC
+            LIMIT 1
+        """)
+        milestone = cur.fetchone()
+
+        if not milestone:
+            return None, {}
+
+        cur.execute("""
+            SELECT player_id, value
+            FROM player_value_snapshots
+            WHERE milestone_id = %s
+        """, (milestone["id"],))
+        values = {row["player_id"]: row["value"] for row in cur.fetchall()}
+
+    return dict(milestone), values
+
+
+def get_last_milestone_participant_snapshot(conn, participant_id: int) -> dict | None:
+    """
+    Return the most recent milestone snapshot for a specific participant.
+
+    Returns a dict with keys:
+        team_value     : int   — team value locked at that milestone
+        budget         : int | None — cash balance at that milestone (None for
+                         snapshots taken before the budget column was added)
+        milestone_name : str
+        milestone_date : date
+
+    Returns None if no completed snapshot exists for this participant.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT ms.team_value, ms.budget, m.name AS milestone_name, m.date AS milestone_date
+            FROM milestone_snapshots ms
+            JOIN milestones m ON m.id = ms.milestone_id
+            WHERE ms.participant_id = %s
+              AND m.snapshot_taken = TRUE
+            ORDER BY m.date DESC
+            LIMIT 1
+        """, (participant_id,))
+        row = cur.fetchone()
+
+    return dict(row) if row else None
 
 
 def delete_milestone(conn, milestone_id: int) -> None:

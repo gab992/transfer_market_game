@@ -10,6 +10,8 @@ User-Agent header on every request.
 """
 
 import re
+import time
+import random
 import db
 import requests
 from bs4 import BeautifulSoup
@@ -66,7 +68,7 @@ def scrape_player(url: str) -> dict:
     }
 
 
-def refresh_all_player_values(conn) -> list[dict]:
+def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -> list[dict]:
     """
     Re-scrape the current market value for every player in the database
     and update their current_value and last_updated fields.
@@ -75,6 +77,10 @@ def refresh_all_player_values(conn) -> list[dict]:
 
     Args:
         conn: An open psycopg2 database connection.
+        delay_range: A (min, max) tuple of seconds to wait between requests.
+            Randomised to avoid bot detection. Defaults to (15, 45).
+        on_player_done: Optional callback called after each player with
+            (index: int, total: int, result: dict). Useful for progress UIs.
 
     Returns:
         A list of dicts summarising the result for each player:
@@ -82,8 +88,9 @@ def refresh_all_player_values(conn) -> list[dict]:
     """
     players = db.get_all_players(conn)
     results = []
+    total = len(players)
 
-    for player in players:
+    for i, player in enumerate(players):
         result = {"name": player["name"], "old_value": player["current_value"]}
         try:
             data = scrape_player(player["transfermrkt_url"])
@@ -97,6 +104,14 @@ def refresh_all_player_values(conn) -> list[dict]:
             result["error"] = str(e)
 
         results.append(result)
+
+        if on_player_done:
+            on_player_done(i + 1, total, result)
+
+        # Randomised delay between requests to reduce bot-detection risk.
+        # Skip the delay after the last player.
+        if i < total - 1:
+            time.sleep(random.uniform(*delay_range))
 
     return results
 
@@ -235,14 +250,15 @@ if __name__ == "__main__":
     load_dotenv()
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
 
-    print("Refreshing all player values...\n")
-    results = refresh_all_player_values(conn)
+    def log_progress(idx, total, result):
+        status = "OK" if result["success"] else f"FAILED ({result['error']})"
+        old = f"€{result['old_value']:,}"
+        new = f"€{result['new_value']:,}"
+        print(f"  [{idx}/{total}] {result['name']}: {old} -> {new}  [{status}]")
 
-    for r in results:
-        status = "OK" if r["success"] else f"FAILED ({r['error']})"
-        old = f"€{r['old_value']:,}"
-        new = f"€{r['new_value']:,}"
-        print(f"  {r['name']}: {old} -> {new}  [{status}]")
+    print("Refreshing all player values...\n")
+    results = refresh_all_player_values(conn, on_player_done=log_progress)
 
     conn.close()
-    print("\nDone.")
+    successes = sum(1 for r in results if r["success"])
+    print(f"\nDone. {successes}/{len(results)} updated successfully.")

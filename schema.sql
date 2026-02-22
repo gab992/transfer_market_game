@@ -50,14 +50,26 @@ CREATE TABLE milestones (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Locks in each participant's team value when the admin takes a snapshot.
--- Cascades on milestone delete so snapshots are removed with their milestone.
+-- Locks in each participant's team value and cash budget when the admin takes
+-- a snapshot. Cascades on milestone delete so snapshots are removed with their
+-- milestone.
 CREATE TABLE milestone_snapshots (
     milestone_id    INT NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
     participant_id  INT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
     team_value      BIGINT NOT NULL,
+    budget          BIGINT,             -- participant's cash balance at snapshot time
     captured_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (milestone_id, participant_id)
+);
+
+-- Records every player's market value at the moment a milestone snapshot is
+-- taken. Enables "change since last milestone" on individual player cards.
+-- Cascades on milestone or player delete.
+CREATE TABLE player_value_snapshots (
+    milestone_id    INT NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+    player_id       INT NOT NULL REFERENCES players(id)    ON DELETE CASCADE,
+    value           BIGINT NOT NULL,
+    PRIMARY KEY (milestone_id, player_id)
 );
 
 -- Admin-initiated draft sessions. While a draft is 'active' the free market
