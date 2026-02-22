@@ -674,6 +674,39 @@ def page_admin():
     else:
         st.info("No user accounts yet.")
 
+    # ---- Assign / Unassign participant for an existing user ----
+    if all_users and participants:
+        st.write("")
+        st.write("**Assign / Unassign Participant**")
+
+        assign_user_options = {
+            f"{u['username']} ({u['participant_name'] or 'no team'})": u["id"]
+            for u in all_users
+        }
+        all_participant_options = {"(None — no team)": None} | {
+            p["name"]: p["id"] for p in participants
+        }
+
+        with st.form("assign_participant_form"):
+            selected_user_label = st.selectbox(
+                "User", options=list(assign_user_options.keys())
+            )
+            selected_participant_label = st.selectbox(
+                "Participant", options=list(all_participant_options.keys())
+            )
+            if st.form_submit_button("Assign"):
+                target_user_id = assign_user_options[selected_user_label]
+                new_pid = all_participant_options[selected_participant_label]
+                try:
+                    auth.update_user_participant(conn, target_user_id, new_pid)
+                    st.success(
+                        f"Linked to '{selected_participant_label}'."
+                        if new_pid else "Unlinked from participant."
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not update: {e}")
+
     st.divider()
 
     # ---- Section: Milestones ----
