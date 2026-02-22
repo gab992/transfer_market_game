@@ -95,6 +95,35 @@ def fmt_euros(value: int) -> str:
     return f"€{value:,}"
 
 
+def fmt_delta(value: int) -> str:
+    """Format a signed euro delta, e.g. +€5.5M or -€3M."""
+    abs_str = fmt_euros(abs(value))
+    if value > 0:
+        return f"+{abs_str}"
+    if value < 0:
+        return f"-{abs_str}"
+    return abs_str
+
+
+def colored_delta(value: int) -> str:
+    """Return an HTML span with green/red/grey coloring for a euro delta."""
+    color = "#2ea043" if value > 0 else "#f85149" if value < 0 else "#888888"
+    return f'<span style="color:{color}">{fmt_delta(value)}</span>'
+
+
+def player_subtitle(player: dict) -> str:
+    """
+    Build a 'Club · Position' subtitle, omitting fields that are missing or
+    uninformative (empty string, None, or the literal 'Unknown').
+    """
+    club     = player.get("club")     or ""
+    position = player.get("position") or ""
+    if club == "Unknown":     club = ""
+    if position == "Unknown": position = ""
+    parts = [p for p in (club, position) if p]
+    return " · ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Page: Leaderboard
 # ---------------------------------------------------------------------------
@@ -125,22 +154,37 @@ def page_leaderboard():
     st.divider()
     st.subheader("Team Rosters")
 
+    last_milestone_info, last_player_values = db.get_last_milestone_player_values(conn)
+    if last_milestone_info:
+        milestone_label = f"{last_milestone_info['name']} ({last_milestone_info['date'].strftime('%d %b %Y')})"
+        st.caption(f"Value changes shown vs last milestone: **{milestone_label}**")
+
     for row in rows:
         roster = db.get_roster(conn, row["id"])
         label = f"**{row['name']}** — {len(roster)} player{'s' if len(roster) != 1 else ''}"
         with st.expander(label):
             if roster:
                 for player in roster:
-                    value_change = player["current_value"] - player["purchased_at_value"]
-                    change_str = (
-                        f" (+{fmt_euros(value_change)})" if value_change > 0
-                        else f" ({fmt_euros(value_change)})" if value_change < 0
+                    vs_purchase = player["current_value"] - player["purchased_at_value"]
+                    purchase_str = (
+                        f" (+{fmt_euros(vs_purchase)})" if vs_purchase > 0
+                        else f" ({fmt_euros(vs_purchase)})" if vs_purchase < 0
                         else ""
                     )
+
+                    milestone_html = ""
+                    if last_milestone_info and player["id"] in last_player_values:
+                        delta = player["current_value"] - last_player_values[player["id"]]
+                        milestone_html = f" · vs milestone: {colored_delta(delta)}"
+                    elif last_milestone_info:
+                        milestone_html = ' · vs milestone: <span style="color:#888888">New</span>'
+
+                    _sub = player_subtitle(player)
                     st.markdown(
-                        f"**{player['name']}** — {player['club']} · {player['position']}  \n"
-                        f"Value: **{fmt_euros(player['current_value'])}**{change_str} · "
-                        f"Paid: {fmt_euros(player['purchased_at_value'])}"
+                        f"**{player['name']}**{(' — ' + _sub) if _sub else ''}  \n"
+                        f"Value: **{fmt_euros(player['current_value'])}**{purchase_str}"
+                        f"{milestone_html} · Paid: {fmt_euros(player['purchased_at_value'])}",
+                        unsafe_allow_html=True,
                     )
             else:
                 st.write("No players yet.")
@@ -163,10 +207,30 @@ def page_my_team():
     roster = db.get_roster(conn, participant_id)
 
     team_value = sum(p["current_value"] for p in roster)
+
+    # Fetch last milestone snapshot for delta metrics
+    last_snap = db.get_last_milestone_participant_snapshot(conn, participant_id)
+
     col1, col2, col3 = st.columns(3)
-    col1.metric("Budget Remaining", fmt_euros(participant["budget"]))
-    col2.metric("Team Value",       fmt_euros(team_value))
-    col3.metric("Players",          f"{len(roster)} / {db.MAX_ROSTER_SIZE}")
+
+    if last_snap:
+        budget_delta = participant["budget"] - last_snap["budget"] if last_snap["budget"] is not None else None
+        team_delta   = team_value - last_snap["team_value"]
+
+        budget_delta_str = (f"+{fmt_euros(budget_delta)}" if budget_delta > 0 else f"-{fmt_euros(abs(budget_delta))}") if budget_delta is not None else None
+        team_delta_str   = f"+{fmt_euros(team_delta)}" if team_delta > 0 else f"-{fmt_euros(abs(team_delta))}"
+
+        col1.metric("Budget Remaining", fmt_euros(participant["budget"]), delta=budget_delta_str)
+        col2.metric("Team Value",       fmt_euros(team_value),            delta=team_delta_str)
+    else:
+        col1.metric("Budget Remaining", fmt_euros(participant["budget"]))
+        col2.metric("Team Value",       fmt_euros(team_value))
+
+    col3.metric("Players", f"{len(roster)} / {db.MAX_ROSTER_SIZE}")
+
+    if last_snap:
+        milestone_label = f"{last_snap['milestone_name']} ({last_snap['milestone_date'].strftime('%d %b %Y')})"
+        st.caption(f"Deltas vs last milestone: **{milestone_label}**")
 
     st.divider()
 
@@ -176,19 +240,33 @@ def page_my_team():
 
     st.subheader("Roster")
 
+    # Fetch per-player milestone values for change-since-milestone display
+    last_milestone_info, last_player_values = db.get_last_milestone_player_values(conn)
+
     for player in roster:
         col_info, col_btn = st.columns([4, 1])
         with col_info:
-            value_change = player["current_value"] - player["purchased_at_value"]
-            change_str = (
-                f"  (+{fmt_euros(value_change)})" if value_change > 0
-                else f"  ({fmt_euros(value_change)})"   if value_change < 0
+            vs_purchase = player["current_value"] - player["purchased_at_value"]
+            purchase_str = (
+                f"  (+{fmt_euros(vs_purchase)})" if vs_purchase > 0
+                else f"  ({fmt_euros(vs_purchase)})" if vs_purchase < 0
                 else ""
             )
+
+            milestone_html = ""
+            if last_milestone_info and player["id"] in last_player_values:
+                delta = player["current_value"] - last_player_values[player["id"]]
+                milestone_html = f"  · vs milestone: {colored_delta(delta)}"
+            elif last_milestone_info:
+                milestone_html = '  · vs milestone: <span style="color:#888888">New</span>'
+
+            _sub = player_subtitle(player)
             st.markdown(
-                f"**{player['name']}** — {player['club']} · {player['position']}  \n"
-                f"Current value: **{fmt_euros(player['current_value'])}**{change_str}  \n"
-                f"Purchased at: {fmt_euros(player['purchased_at_value'])}"
+                f"**{player['name']}**{(' — ' + _sub) if _sub else ''}  \n"
+                f"Current value: **{fmt_euros(player['current_value'])}**{purchase_str}"
+                f"{milestone_html}  \n"
+                f"Purchased at: {fmt_euros(player['purchased_at_value'])}",
+                unsafe_allow_html=True,
             )
         with col_btn:
             if st.button("Sell", key=f"sell_{player['id']}"):
@@ -267,8 +345,9 @@ def page_market():
         for player in available:
             col_info, col_btn = st.columns([4, 1])
             with col_info:
+                _sub = player_subtitle(player)
                 st.markdown(
-                    f"**{player['name']}** — {player['club']} · {player['position']}  \n"
+                    f"**{player['name']}**{(' — ' + _sub) if _sub else ''}  \n"
                     f"Value: **{fmt_euros(player['current_value'])}**"
                 )
             with col_btn:
@@ -433,6 +512,50 @@ def page_admin():
 
     st.header("Admin")
 
+    # ---- Section: My Account ----
+    st.subheader("My Account")
+    st.caption("Link your admin account to a participant so you can manage your own team.")
+
+    participants = db.get_participants(conn)
+    all_users = auth.get_all_users(conn)
+
+    # Build options: None + any participant not linked to a DIFFERENT user
+    other_linked_ids = {
+        u["participant_id"] for u in all_users
+        if u["participant_id"] and u["id"] != user["id"]
+    }
+    linkable = [p for p in participants if p["id"] not in other_linked_ids]
+    link_options = {"(None — no team)": None} | {p["name"]: p["id"] for p in linkable}
+
+    current_participant_id = user["participant_id"]
+    current_label = next(
+        (p["name"] for p in participants if p["id"] == current_participant_id),
+        "(None — no team)",
+    )
+
+    with st.form("my_account_form"):
+        selected_label = st.selectbox(
+            "Linked participant",
+            options=list(link_options.keys()),
+            index=list(link_options.keys()).index(current_label)
+                  if current_label in link_options else 0,
+        )
+        if st.form_submit_button("Save"):
+            new_participant_id = link_options[selected_label]
+            try:
+                auth.update_user_participant(conn, user["id"], new_participant_id)
+                # Keep session state in sync so My Team works immediately
+                st.session_state["user"]["participant_id"] = new_participant_id
+                st.success(
+                    f"Linked to '{selected_label}'." if new_participant_id
+                    else "Unlinked from participant."
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not update account: {e}")
+
+    st.divider()
+
     # ---- Section: Participants ----
     st.subheader("Participants")
     st.caption("Add or remove game participants.")
@@ -457,6 +580,7 @@ def page_admin():
                 except Exception as e:
                     st.error(f"Could not add participant: {e}")
 
+    # Re-fetch participants to include any just-added participant
     participants = db.get_participants(conn)
     if participants:
         for p in participants:
@@ -501,6 +625,7 @@ def page_admin():
     st.caption("Create login accounts and link them to participants.")
 
     # Map participant name -> id for the dropdown (only unlinked participants)
+    # Re-fetch all_users to reflect any accounts added earlier in this render
     all_users = auth.get_all_users(conn)
     linked_participant_ids = {u["participant_id"] for u in all_users if u["participant_id"]}
     unlinked_participants = [p for p in participants if p["id"] not in linked_participant_ids]
@@ -627,6 +752,49 @@ def page_admin():
                         st.error(str(e))
     else:
         st.info("No milestones yet.")
+
+    st.divider()
+
+    # ---- Section: Market Values ----
+    st.subheader("Market Values")
+    st.caption(
+        "Re-scrape current market values for all players from Transfermarkt. "
+        "Requests are spaced 15–45 seconds apart to avoid bot detection — expect roughly 30 seconds per player."
+    )
+
+    all_players = db.get_all_players(conn)
+
+    if not all_players:
+        st.info("No players in the database yet.")
+    else:
+        last_updated = max(
+            (p["last_updated"] for p in all_players if p["last_updated"]),
+            default=None,
+        )
+        if last_updated:
+            st.caption(f"Last updated: {last_updated.strftime('%d %b %Y at %H:%M UTC')}")
+
+        if st.button(f"Refresh All Player Values ({len(all_players)} players)"):
+            refresh_results = []
+
+            def _on_player_done(idx, total, result):
+                refresh_results.append(result)
+                progress_bar.progress(idx / total)
+                icon = "✓" if result["success"] else "✗"
+                status_log.write(f"{icon} [{idx}/{total}] {result['name']}")
+
+            with st.status(f"Refreshing {len(all_players)} player(s)...", expanded=True) as status_box:
+                status_log = st.empty()
+                progress_bar = st.progress(0)
+                scraper.refresh_all_player_values(conn, on_player_done=_on_player_done)
+                status_box.update(label="Refresh complete.", state="complete", expanded=False)
+
+            successes = sum(1 for r in refresh_results if r["success"])
+            failures = len(refresh_results) - successes
+            if failures:
+                st.warning(f"Updated {successes} player(s). {failures} failed.")
+            else:
+                st.success(f"All {successes} player(s) updated successfully.")
 
     st.divider()
 

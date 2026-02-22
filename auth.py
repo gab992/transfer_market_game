@@ -94,6 +94,24 @@ def delete_user(conn, user_id: int) -> None:
     conn.commit()
 
 
+def update_user_participant(conn, user_id: int, participant_id: int | None) -> None:
+    """
+    Update the participant linked to a user account.
+
+    Passing None unlinks the user from any participant.
+
+    Raises:
+        psycopg2.errors.UniqueViolation: if participant_id is already linked
+        to a different user account (enforced by the UNIQUE constraint).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE users SET participant_id = %s WHERE id = %s",
+            (participant_id, user_id)
+        )
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Session state helpers
 # ---------------------------------------------------------------------------
