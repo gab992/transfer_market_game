@@ -24,6 +24,18 @@ CREATE TABLE players (
     last_updated        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- App login accounts. Each user can optionally be linked to one participant
+-- (their team). The admin account typically has participant_id = NULL since
+-- the admin may not be playing. Only the admin can create user accounts.
+CREATE TABLE users (
+    id              SERIAL PRIMARY KEY,
+    username        TEXT NOT NULL UNIQUE,
+    password_hash   TEXT NOT NULL,
+    is_admin        BOOLEAN NOT NULL DEFAULT FALSE,
+    participant_id  INT UNIQUE REFERENCES participants(id),  -- one-to-one, nullable
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Links participants to the players currently on their roster.
 -- A row here means the participant owns that player right now.
 -- When a player is sold, the row is deleted (player stays in `players`).
