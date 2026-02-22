@@ -36,6 +36,53 @@ CREATE TABLE users (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Admin-defined checkpoints for evaluating game performance.
+-- The admin chooses which metrics to display and manually triggers a snapshot
+-- to lock in team values when ready.
+CREATE TABLE milestones (
+    id                  SERIAL PRIMARY KEY,
+    name                TEXT NOT NULL,
+    date                DATE NOT NULL,
+    show_total_value    BOOLEAN NOT NULL DEFAULT TRUE,
+    show_value_change   BOOLEAN NOT NULL DEFAULT FALSE,  -- change vs prior milestone
+    show_pct_change     BOOLEAN NOT NULL DEFAULT FALSE,  -- % change vs prior milestone
+    snapshot_taken      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Locks in each participant's team value when the admin takes a snapshot.
+-- Cascades on milestone delete so snapshots are removed with their milestone.
+CREATE TABLE milestone_snapshots (
+    milestone_id    INT NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+    participant_id  INT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    team_value      BIGINT NOT NULL,
+    captured_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (milestone_id, participant_id)
+);
+
+-- Admin-initiated draft sessions. While a draft is 'active' the free market
+-- is locked and participants take turns buying one player per round.
+-- After the draft completes (or is ended early) status flips to 'completed'
+-- and normal buying resumes.
+CREATE TABLE drafts (
+    id               SERIAL PRIMARY KEY,
+    num_rounds       INT NOT NULL,
+    snake            BOOLEAN NOT NULL DEFAULT FALSE,    -- reverse order each round
+    budget_bonus     BIGINT NOT NULL DEFAULT 0,         -- added to all budgets at draft start
+    status           TEXT NOT NULL DEFAULT 'active',    -- 'active' | 'completed'
+    current_round    INT NOT NULL DEFAULT 1,
+    current_pick_idx INT NOT NULL DEFAULT 0,            -- 0-based index into current round order
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Base pick order for a draft. Snake reversal is computed at query time.
+CREATE TABLE draft_order (
+    draft_id       INT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+    position       INT NOT NULL,   -- 1-based
+    participant_id INT NOT NULL REFERENCES participants(id),
+    PRIMARY KEY (draft_id, position)
+);
+
 -- Links participants to the players currently on their roster.
 -- A row here means the participant owns that player right now.
 -- When a player is sold, the row is deleted (player stays in `players`).
