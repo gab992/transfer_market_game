@@ -221,7 +221,7 @@ def _parse_value_string(raw: str) -> int:
     raw = raw.replace("\xa0", "").replace(",", ".").strip()
 
     # Extract numeric part and suffix
-    match = re.search(r"€([\d.]+)\s*(m|Th\.|bn)?", raw, re.I)
+    match = re.search(r"€([\d.]+)\s*(m|Th\.|bn|k)?", raw, re.I)
     if not match:
         raise ValueError(f"Could not parse value string: '{raw}'")
 
@@ -230,7 +230,7 @@ def _parse_value_string(raw: str) -> int:
 
     if suffix == "m":
         return int(number * 1_000_000)
-    elif suffix == "th.":
+    elif suffix in ("th.", "k"):
         return int(number * 1_000)
     elif suffix == "bn":
         return int(number * 1_000_000_000)
