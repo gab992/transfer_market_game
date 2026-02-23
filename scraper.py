@@ -17,13 +17,26 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 
-# Transfermarkt returns 403 without a real-looking User-Agent.
+# Transfermarkt returns 403 without a full set of browser-like headers.
+# A bare User-Agent is no longer sufficient — they also check Accept,
+# Accept-Language, and other headers to distinguish bots from real browsers.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.transfermarkt.us/",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
 }
 
 
@@ -49,7 +62,11 @@ def scrape_player(url: str) -> dict:
     # has the market value we need.
     url = _normalize_url(url)
 
-    response = requests.get(url, headers=HEADERS, timeout=10)
+    time.sleep(random.uniform(1, 3))
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    response = session.get(url, timeout=10)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
