@@ -839,7 +839,7 @@ def advance_draft(conn, draft_id: int) -> None:
     with conn.cursor() as cur:
         # Lock the draft row for the duration of this transaction
         cur.execute(
-            "SELECT id, num_rounds, snake, current_round, current_pick_idx "
+            "SELECT id, status, num_rounds, snake, current_round, current_pick_idx "
             "FROM drafts WHERE id = %s FOR UPDATE",
             (draft_id,)
         )

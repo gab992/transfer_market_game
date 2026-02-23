@@ -307,7 +307,6 @@ def page_market():
         my_turn = (current_drafter_id == participant_id)
 
         # Build the display order for the current round (accounting for snake)
-        n = len(base_order)
         if active_draft["snake"] and active_draft["current_round"] % 2 == 0:
             round_order = list(reversed(base_order))
         else:
@@ -318,28 +317,41 @@ def page_market():
             "Unknown"
         )
 
-        st.info(
-            f"**Draft active — Round {active_draft['current_round']} of {active_draft['num_rounds']}**  \n"
-            f"Currently picking: **{current_drafter_name}**  \n"
-            f"Pick order this round: "
-            + " → ".join(
-                f"**{p['participant_name']}**" if p["participant_id"] == current_drafter_id
-                else p["participant_name"]
-                for p in round_order
-            )
+        pick_order_str = " → ".join(
+            f"**{p['participant_name']}**" if p["participant_id"] == current_drafter_id
+            else p["participant_name"]
+            for p in round_order
         )
 
-        if not my_turn:
-            st.warning(f"It's not your turn. Waiting for **{current_drafter_name}** to pick.")
+        if my_turn:
+            st.success(
+                f"### YOUR TURN TO PICK!\n"
+                f"**Round {active_draft['current_round']} of {active_draft['num_rounds']}**  \n"
+                f"Pick order: {pick_order_str}"
+            )
+        else:
+            st.error(
+                f"### NOT YOUR TURN\n"
+                f"Waiting for **{current_drafter_name}** to pick.  \n"
+                f"**Round {active_draft['current_round']} of {active_draft['num_rounds']}** — "
+                f"Pick order: {pick_order_str}"
+            )
 
     st.divider()
 
     # --- Section 1: Buy an available player (already in the DB) ---
     st.subheader("Available Players")
-    available = db.get_available_players(conn)
 
-    # During a draft, only the current drafter can buy
-    buying_allowed = not active_draft or my_turn
+    # During a draft, only the current drafter may do anything in the market.
+    if active_draft and not my_turn:
+        current_drafter_name = next(
+            (p["participant_name"] for p in base_order if p["participant_id"] == current_drafter_id),
+            "Unknown"
+        )
+        st.info(f"Player purchases are locked until it is your turn. Currently waiting for **{current_drafter_name}**.")
+        return
+
+    available = db.get_available_players(conn)
 
     if available:
         for player in available:
@@ -352,35 +364,30 @@ def page_market():
                 )
             with col_btn:
                 affordable = player["current_value"] <= participant["budget"]
-                can_buy = buying_allowed and affordable
                 if st.button(
                     "Buy",
                     key=f"buy_{player['id']}",
-                    disabled=not can_buy,
-                    help=(
-                        "Not your turn" if not buying_allowed
-                        else None if affordable
-                        else "Insufficient budget"
-                    ),
+                    disabled=not affordable,
+                    help=None if affordable else "Insufficient budget",
                 ):
-                    try:
-                        updated = db.buy_existing_player(conn, participant_id, player["id"])
-                        if active_draft:
-                            db.advance_draft(conn, active_draft["id"])
-                        st.success(
-                            f"Bought {player['name']} for {fmt_euros(player['current_value'])}. "
-                            f"New budget: {fmt_euros(updated['budget'])}"
-                        )
+                    # Server-side turn guard: re-check current drafter at purchase time
+                    if active_draft and db.get_current_drafter_id(conn, active_draft["id"]) != participant_id:
+                        st.error("It is no longer your turn. Please wait.")
                         st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
+                    else:
+                        try:
+                            updated = db.buy_existing_player(conn, participant_id, player["id"])
+                            if active_draft:
+                                db.advance_draft(conn, active_draft["id"])
+                            st.success(
+                                f"Bought {player['name']} for {fmt_euros(player['current_value'])}. "
+                                f"New budget: {fmt_euros(updated['budget'])}"
+                            )
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
     else:
         st.info("No players currently available. Add a new player below.")
-
-    # During a draft, hide the "add new by URL" section if it's not your turn —
-    # looking up and adding a new player should be reserved for the active drafter.
-    if active_draft and not my_turn:
-        return
 
     st.divider()
 
@@ -421,18 +428,23 @@ def page_market():
         col_confirm, col_cancel = st.columns(2)
         with col_confirm:
             if st.button("Confirm Purchase", disabled=not affordable):
-                try:
-                    updated = db.buy_new_player(conn, participant_id, data)
-                    if active_draft:
-                        db.advance_draft(conn, active_draft["id"])
-                    st.success(
-                        f"Bought {data['name']} for {fmt_euros(data['current_value'])}. "
-                        f"New budget: {fmt_euros(updated['budget'])}"
-                    )
-                    st.session_state.pop("pending_player", None)
+                # Server-side turn guard: re-check current drafter at purchase time
+                if active_draft and db.get_current_drafter_id(conn, active_draft["id"]) != participant_id:
+                    st.error("It is no longer your turn. Please wait.")
                     st.rerun()
-                except ValueError as e:
-                    st.error(str(e))
+                else:
+                    try:
+                        updated = db.buy_new_player(conn, participant_id, data)
+                        if active_draft:
+                            db.advance_draft(conn, active_draft["id"])
+                        st.success(
+                            f"Bought {data['name']} for {fmt_euros(data['current_value'])}. "
+                            f"New budget: {fmt_euros(updated['budget'])}"
+                        )
+                        st.session_state.pop("pending_player", None)
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
         with col_cancel:
             if st.button("Cancel"):
                 st.session_state.pop("pending_player", None)
@@ -877,12 +889,20 @@ def page_admin():
 
         st.write("**Base pick order:**")
         for entry in base_order:
-            st.write(f"{entry['position']}. {entry['participant_name']}")
+            marker = " ← current" if entry["participant_id"] == current_drafter_id else ""
+            st.write(f"{entry['position']}. {entry['participant_name']}{marker}")
 
-        if st.button("End Draft Early", type="primary"):
-            db.complete_draft(conn, active_draft["id"])
-            st.success("Draft ended.")
-            st.rerun()
+        col_skip, col_end = st.columns(2)
+        with col_skip:
+            if st.button("Force Skip Turn", help="Advance to the next participant without a pick being made."):
+                db.advance_draft(conn, active_draft["id"])
+                st.success("Skipped to the next participant.")
+                st.rerun()
+        with col_end:
+            if st.button("End Draft Early", type="primary"):
+                db.complete_draft(conn, active_draft["id"])
+                st.success("Draft ended.")
+                st.rerun()
 
     else:
         # No active draft — show initiation form
