@@ -40,7 +40,7 @@ HEADERS = {
 }
 
 
-def scrape_player(url: str) -> dict:
+def scrape_player(url: str, session: requests.Session = None) -> dict:
     """
     Fetch a player's name, club, position, and current market value from
     a Transfermarkt profile URL.
@@ -48,6 +48,8 @@ def scrape_player(url: str) -> dict:
     Args:
         url: A Transfermarkt player profile URL, e.g.:
              https://www.transfermarkt.com/erling-haaland/profil/spieler/418560
+        session: Optional requests.Session to reuse across calls (recommended
+            for bulk scraping so cookies are maintained between requests).
 
     Returns:
         A dict with keys: name, club, position, current_value, transfermrkt_url
@@ -64,8 +66,9 @@ def scrape_player(url: str) -> dict:
 
     time.sleep(random.uniform(1, 3))
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    if session is None:
+        session = requests.Session()
+        session.headers.update(HEADERS)
     response = session.get(url, timeout=10)
     response.raise_for_status()
 
@@ -107,10 +110,15 @@ def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -
     results = []
     total = len(players)
 
+    # Reuse a single session across all requests so cookies are preserved,
+    # which makes the traffic look more like a real browser session.
+    shared_session = requests.Session()
+    shared_session.headers.update(HEADERS)
+
     for i, player in enumerate(players):
         result = {"name": player["name"], "old_value": player["current_value"]}
         try:
-            data = scrape_player(player["transfermrkt_url"])
+            data = scrape_player(player["transfermrkt_url"], session=shared_session)
             db.update_player_value(conn, player["id"], data["current_value"])
             result["new_value"] = data["current_value"]
             result["success"] = True
