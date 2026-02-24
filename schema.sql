@@ -43,6 +43,7 @@ CREATE TABLE milestones (
     id                  SERIAL PRIMARY KEY,
     name                TEXT NOT NULL,
     date                DATE NOT NULL,
+    show_portfolio_value BOOLEAN NOT NULL DEFAULT FALSE, -- team value + unspent budget
     show_total_value    BOOLEAN NOT NULL DEFAULT TRUE,
     show_value_change   BOOLEAN NOT NULL DEFAULT FALSE,  -- change vs prior milestone
     show_pct_change     BOOLEAN NOT NULL DEFAULT FALSE,  -- % change vs prior milestone
