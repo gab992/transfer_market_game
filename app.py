@@ -4,12 +4,13 @@ app.py — Streamlit UI for the Transfer Market Fantasy Game.
 Run with:
     uv run streamlit run app.py
 
-Five pages (Admin is only visible to admin users):
+Six pages (Admin is only visible to admin users):
   1. Leaderboard  — standings ranked by total assets (visible to all)
   2. My Team      — view and manage your own roster
   3. Market       — buy available players or add a new one by Transfermarkt URL
   4. Milestones   — upcoming milestone date and historical milestone results
-  5. Admin        — manage participants, users, and milestones (admin only)
+  5. Feed         — dated log of all transfers across participants
+  6. Admin        — manage participants, users, and milestones (admin only)
 """
 
 import os
@@ -75,7 +76,7 @@ with st.sidebar:
 
     st.divider()
 
-    pages = ["Leaderboard", "My Team", "Market", "Milestones"]
+    pages = ["Leaderboard", "My Team", "Market", "Milestones", "Feed"]
     if auth.is_admin():
         pages.append("Admin")
 
@@ -491,6 +492,9 @@ def page_milestones():
         for i, r in enumerate(results):
             row = {"Rank": i + 1, "Participant": r["participant_name"]}
 
+            if milestone.get("show_portfolio_value"):
+                row["Portfolio Value"] = fmt_euros(r["portfolio_value"])
+
             if milestone["show_total_value"]:
                 row["Team Value"] = fmt_euros(r["team_value"])
 
@@ -511,6 +515,56 @@ def page_milestones():
             table_rows.append(row)
 
         st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Page: Feed — dated log of all transfers across participants
+# ---------------------------------------------------------------------------
+
+def page_feed():
+    st.header("Transfer Feed")
+    st.caption("A live log of every buy and sell across all participants.")
+
+    transfers = db.get_transfer_feed(conn)
+
+    if not transfers:
+        st.info("No transfers yet. Moves will appear here once players are bought or sold.")
+        return
+
+    # Group entries by date for a clean dated timeline
+    from collections import defaultdict
+    import datetime
+
+    grouped: dict[datetime.date, list] = defaultdict(list)
+    for t in transfers:
+        day = t["transferred_at"].date()
+        grouped[day].append(t)
+
+    for day in sorted(grouped.keys(), reverse=True):
+        st.subheader(day.strftime("%-d %B %Y"))
+        for t in grouped[day]:
+            time_str = t["transferred_at"].strftime("%H:%M")
+            is_buy = t["transfer_type"] == "buy"
+            action_icon = "🟢" if is_buy else "🔴"
+            action_word = "bought" if is_buy else "sold"
+            value_str = fmt_euros(t["value"])
+            subtitle = f"{t['player_club']} · {t['player_position']}"
+
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.markdown(
+                    f"{action_icon} **{t['participant_name']}** {action_word} "
+                    f"**{t['player_name']}** <span style='color:gray;font-size:0.85em'>({subtitle})</span> "
+                    f"for **{value_str}**",
+                    unsafe_allow_html=True,
+                )
+            with col2:
+                st.markdown(
+                    f"<span style='color:gray;font-size:0.85em'>{time_str}</span>",
+                    unsafe_allow_html=True,
+                )
+
+        st.divider()
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +788,8 @@ def page_admin():
         m_name  = st.text_input("Milestone name", placeholder="e.g. Week 4")
         m_date  = st.date_input("Date")
         st.write("Metrics to display:")
-        m_total  = st.checkbox("Total team value", value=True)
+        m_portfolio = st.checkbox("Total portfolio value (team value + unspent budget)", value=True)
+        m_total  = st.checkbox("Total team value")
         m_change = st.checkbox(
             "Value change since last milestone",
             disabled=not has_any_snapshot,
@@ -755,6 +810,7 @@ def page_admin():
                         conn,
                         name=m_name.strip(),
                         date=m_date.isoformat(),
+                        show_portfolio_value=m_portfolio,
                         show_total_value=m_total,
                         show_value_change=m_change,
                         show_pct_change=m_pct,
@@ -772,9 +828,10 @@ def page_admin():
             with col_info:
                 status = "✓ Snapshot taken" if m["snapshot_taken"] else "Pending snapshot"
                 metrics = []
-                if m["show_total_value"]:  metrics.append("Total value")
-                if m["show_value_change"]: metrics.append("Value change")
-                if m["show_pct_change"]:   metrics.append("% change")
+                if m.get("show_portfolio_value"): metrics.append("Portfolio value")
+                if m["show_total_value"]:         metrics.append("Total value")
+                if m["show_value_change"]:        metrics.append("Value change")
+                if m["show_pct_change"]:          metrics.append("% change")
                 st.write(
                     f"**{m['name']}** — {m['date'].strftime('%d %b %Y')}  \n"
                     f"{status} · Metrics: {', '.join(metrics)}"
@@ -972,5 +1029,7 @@ elif page == "Market":
     page_market()
 elif page == "Milestones":
     page_milestones()
+elif page == "Feed":
+    page_feed()
 elif page == "Admin":
     page_admin()

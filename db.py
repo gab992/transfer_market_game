@@ -205,7 +205,7 @@ def buy_existing_player(conn, participant_id: int, player_id: int) -> dict:
             raise ValueError("Participant not found.")
 
         cur.execute(
-            "SELECT id, name, current_value FROM players WHERE id = %s FOR UPDATE",
+            "SELECT id, name, club, position, current_value FROM players WHERE id = %s FOR UPDATE",
             (player_id,)
         )
         player = cur.fetchone()
@@ -247,6 +247,12 @@ def buy_existing_player(conn, participant_id: int, player_id: int) -> dict:
             "INSERT INTO rosters (participant_id, player_id, purchased_at_value) VALUES (%s, %s, %s)",
             (participant_id, player_id, price)
         )
+
+        # Log transfer
+        cur.execute("""
+            INSERT INTO transfers (participant_id, participant_name, player_id, player_name, player_club, player_position, transfer_type, value)
+            VALUES (%s, %s, %s, %s, %s, %s, 'buy', %s)
+        """, (participant_id, participant["name"], player_id, player["name"], player["club"], player["position"], price))
 
     conn.commit()
     return get_participant(conn, participant_id)
@@ -324,6 +330,12 @@ def buy_new_player(conn, participant_id: int, player_data: dict) -> dict:
             (participant_id, player_id, price)
         )
 
+        # Log transfer
+        cur.execute("""
+            INSERT INTO transfers (participant_id, participant_name, player_id, player_name, player_club, player_position, transfer_type, value)
+            VALUES (%s, %s, %s, %s, %s, %s, 'buy', %s)
+        """, (participant_id, participant["name"], player_id, player_data["name"], player_data["club"], player_data["position"], price))
+
     conn.commit()
     return get_participant(conn, participant_id)
 
@@ -343,11 +355,12 @@ def sell_player(conn, participant_id: int, player_id: int) -> dict:
         ValueError: if the player is not on this participant's roster.
     """
     with conn.cursor() as cur:
-        # Verify ownership and get the player's current value
+        # Verify ownership and get the player's current value, club, position
         cur.execute("""
-            SELECT p.current_value, p.name
+            SELECT p.current_value, p.name, p.club, p.position, pt.name AS participant_name
             FROM rosters r
             JOIN players p ON p.id = r.player_id
+            JOIN participants pt ON pt.id = r.participant_id
             WHERE r.participant_id = %s AND r.player_id = %s
         """, (participant_id, player_id))
         row = cur.fetchone()
@@ -368,8 +381,36 @@ def sell_player(conn, participant_id: int, player_id: int) -> dict:
             (participant_id, player_id)
         )
 
+        # Log transfer
+        cur.execute("""
+            INSERT INTO transfers (participant_id, participant_name, player_id, player_name, player_club, player_position, transfer_type, value)
+            VALUES (%s, %s, %s, %s, %s, %s, 'sell', %s)
+        """, (participant_id, row["participant_name"], player_id, row["name"], row["club"], row["position"], sale_price))
+
     conn.commit()
     return get_participant(conn, participant_id)
+
+
+# ---------------------------------------------------------------------------
+# Transfer Feed
+# ---------------------------------------------------------------------------
+
+def get_transfer_feed(conn, limit: int = 100) -> list[dict]:
+    """
+    Return the most recent transfers across all participants, newest first.
+
+    Columns: id, participant_id, participant_name, player_id, player_name,
+             player_club, player_position, transfer_type, value, transferred_at
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, participant_id, participant_name, player_id, player_name,
+                   player_club, player_position, transfer_type, value, transferred_at
+            FROM transfers
+            ORDER BY transferred_at DESC
+            LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +484,7 @@ def delete_participant(conn, participant_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def create_milestone(conn, name: str, date: str,
+                     show_portfolio_value: bool,
                      show_total_value: bool,
                      show_value_change: bool,
                      show_pct_change: bool) -> dict:
@@ -450,11 +492,13 @@ def create_milestone(conn, name: str, date: str,
     Create a new milestone checkpoint.
 
     Args:
-        name:              Display name for this milestone (e.g. "Week 4").
-        date:              Target date string in ISO format (YYYY-MM-DD).
-        show_total_value:  Whether to display each team's total value.
-        show_value_change: Whether to display value change vs prior milestone.
-        show_pct_change:   Whether to display % change vs prior milestone.
+        name:                 Display name for this milestone (e.g. "Week 4").
+        date:                 Target date string in ISO format (YYYY-MM-DD).
+        show_portfolio_value: Whether to display each team's total portfolio value
+                              (team value + unspent budget).
+        show_total_value:     Whether to display each team's total value.
+        show_value_change:    Whether to display value change vs prior milestone.
+        show_pct_change:      Whether to display % change vs prior milestone.
 
     Returns:
         The created milestone row.
@@ -462,11 +506,11 @@ def create_milestone(conn, name: str, date: str,
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO milestones
-                (name, date, show_total_value, show_value_change, show_pct_change)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id, name, date, show_total_value, show_value_change,
-                      show_pct_change, snapshot_taken
-        """, (name, date, show_total_value, show_value_change, show_pct_change))
+                (name, date, show_portfolio_value, show_total_value, show_value_change, show_pct_change)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, name, date, show_portfolio_value, show_total_value,
+                      show_value_change, show_pct_change, snapshot_taken
+        """, (name, date, show_portfolio_value, show_total_value, show_value_change, show_pct_change))
         row = cur.fetchone()
     conn.commit()
     return row
@@ -476,8 +520,8 @@ def get_milestones(conn) -> list[dict]:
     """Return all milestones ordered by date ascending."""
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id, name, date, show_total_value, show_value_change,
-                   show_pct_change, snapshot_taken, created_at
+            SELECT id, name, date, show_portfolio_value, show_total_value,
+                   show_value_change, show_pct_change, snapshot_taken, created_at
             FROM milestones
             ORDER BY date ASC
         """)
@@ -567,6 +611,8 @@ def get_milestone_results(conn, milestone_id: int) -> list[dict]:
     Each row contains:
         participant_name : str
         team_value       : int   — value at this milestone
+        budget           : int   — unspent cash at this milestone
+        portfolio_value  : int   — team_value + budget
         prev_team_value  : int | None  — value at the prior milestone (if any)
         value_change     : int | None  — difference vs prior milestone
         pct_change       : float | None — % difference vs prior milestone
@@ -576,7 +622,8 @@ def get_milestone_results(conn, milestone_id: int) -> list[dict]:
     with conn.cursor() as cur:
         # Fetch this milestone's snapshots
         cur.execute("""
-            SELECT ms.participant_id, p.name AS participant_name, ms.team_value
+            SELECT ms.participant_id, p.name AS participant_name,
+                   ms.team_value, COALESCE(ms.budget, 0) AS budget
             FROM milestone_snapshots ms
             JOIN participants p ON p.id = ms.participant_id
             WHERE ms.milestone_id = %s
@@ -619,6 +666,8 @@ def get_milestone_results(conn, milestone_id: int) -> list[dict]:
         results.append({
             "participant_name": snap["participant_name"],
             "team_value":       snap["team_value"],
+            "budget":           snap["budget"],
+            "portfolio_value":  snap["team_value"] + snap["budget"],
             "prev_team_value":  prev_value,
             "value_change":     value_change,
             "pct_change":       pct_change,
