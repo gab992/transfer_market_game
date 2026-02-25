@@ -121,13 +121,114 @@ def insert_player(conn, name: str, club: str, position: str,
 
 
 def update_player_value(conn, player_id: int, new_value: int) -> None:
-    """Update a player's current_value and set last_updated to now."""
+    """
+    Update a player's current_value (and transfermrkt_value) and set last_updated to now.
+    Called by the Transfermarkt scraper — mirrors the new value into transfermrkt_value
+    so we can restore it later if the admin switches sources.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE players
-            SET current_value = %s, last_updated = NOW()
+            SET current_value = %s, transfermrkt_value = %s, last_updated = NOW()
             WHERE id = %s
-        """, (new_value, player_id))
+        """, (new_value, new_value, player_id))
+    conn.commit()
+
+
+def update_player_fotmob_value(conn, player_id: int, new_value: int) -> None:
+    """
+    Update a player's fotmob_value (and current_value) from the FotMob scraper.
+    Always writes to fotmob_value; also updates current_value so the game
+    reflects the fresh FotMob data immediately after a FotMob refresh run.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE players
+            SET fotmob_value = %s, fotmob_last_updated = NOW(),
+                current_value = %s, last_updated = NOW()
+            WHERE id = %s
+        """, (new_value, new_value, player_id))
+    conn.commit()
+
+
+def update_player_fotmob_url(conn, player_id: int, fotmob_url: str | None) -> None:
+    """Set or clear the FotMob profile URL for a player."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE players SET fotmob_url = %s WHERE id = %s",
+            (fotmob_url or None, player_id)
+        )
+    conn.commit()
+
+
+def get_all_players_with_fotmob(conn) -> list[dict]:
+    """
+    Return every player including FotMob-related columns.
+    Used by the FotMob scraper and the admin FotMob management UI.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, name, club, position, transfermrkt_url, current_value,
+                   last_updated, transfermrkt_value,
+                   fotmob_url, fotmob_value, fotmob_last_updated
+            FROM players
+            ORDER BY name
+        """)
+        return cur.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Game settings
+# ---------------------------------------------------------------------------
+
+def get_game_setting(conn, key: str) -> str | None:
+    """Return the value of a game-wide setting, or None if not set."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM game_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+
+def set_game_setting(conn, key: str, value: str) -> None:
+    """Insert or update a game-wide setting."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO game_settings (key, value)
+            VALUES (%s, %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """, (key, value))
+    conn.commit()
+
+
+def set_value_source(conn, source: str) -> None:
+    """
+    Switch the active value source ('transfermrkt' or 'fotmob').
+
+    Copies the chosen stored-value column into current_value for every player
+    that has a non-null value for that source, then records the change in
+    game_settings.
+    """
+    if source not in ("transfermrkt", "fotmob"):
+        raise ValueError(f"Unknown value source: {source!r}")
+
+    with conn.cursor() as cur:
+        if source == "fotmob":
+            cur.execute("""
+                UPDATE players
+                SET current_value = fotmob_value, last_updated = NOW()
+                WHERE fotmob_value IS NOT NULL
+            """)
+        else:
+            cur.execute("""
+                UPDATE players
+                SET current_value = transfermrkt_value, last_updated = NOW()
+                WHERE transfermrkt_value IS NOT NULL
+            """)
+        cur.execute("""
+            INSERT INTO game_settings (key, value)
+            VALUES ('value_source', %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """, (source,))
     conn.commit()
 
 
