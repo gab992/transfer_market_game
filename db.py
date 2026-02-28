@@ -413,6 +413,541 @@ def get_transfer_feed(conn, limit: int = 100) -> list[dict]:
         return cur.fetchall()
 
 
+def get_combined_feed(conn, limit: int = 100) -> list[dict]:
+    """
+    Return a unified activity feed combining buy/sell transfers and trade offers
+    (pending and accepted only), sorted newest first.
+
+    Each row has:
+      event_type  : 'buy_sell' | 'trade_offer'
+      event_time  : timestamp for sorting / display
+
+    buy_sell rows also carry:
+      participant_name, player_name, player_club, player_position,
+      transfer_type ('buy'|'sell'), value
+
+    trade_offer rows also carry:
+      offer_id, sender_name, receiver_name, sender_money, receiver_money,
+      status ('pending'|'accepted')
+      sender_gives  : list of dicts {player_name, player_club, player_position}
+      receiver_gives: list of dicts {player_name, player_club, player_position}
+    """
+    import json
+
+    with conn.cursor() as cur:
+        # Fetch buy/sell events
+        cur.execute("""
+            SELECT
+                'buy_sell'       AS event_type,
+                transferred_at   AS event_time,
+                NULL::int        AS offer_id,
+                participant_name,
+                player_name,
+                player_club,
+                player_position,
+                transfer_type,
+                value,
+                NULL             AS sender_name,
+                NULL             AS receiver_name,
+                NULL::bigint     AS sender_money,
+                NULL::bigint     AS receiver_money,
+                NULL             AS status
+            FROM transfers
+            ORDER BY transferred_at DESC
+            LIMIT %s
+        """, (limit,))
+        buy_sell_rows = [dict(r) for r in cur.fetchall()]
+
+        # Fetch pending + accepted trade offers
+        cur.execute("""
+            SELECT
+                'trade_offer'    AS event_type,
+                created_at       AS event_time,
+                id               AS offer_id,
+                NULL             AS participant_name,
+                NULL             AS player_name,
+                NULL             AS player_club,
+                NULL             AS player_position,
+                NULL             AS transfer_type,
+                NULL::bigint     AS value,
+                sender_name,
+                receiver_name,
+                sender_money,
+                receiver_money,
+                status
+            FROM trade_offers
+            WHERE status IN ('pending', 'accepted')
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,))
+        trade_rows = [dict(r) for r in cur.fetchall()]
+
+        # Fetch all players for trade offers in one query
+        if trade_rows:
+            offer_ids = [r["offer_id"] for r in trade_rows]
+            cur.execute("""
+                SELECT offer_id, player_name, player_club, player_position, direction
+                FROM trade_offer_players
+                WHERE offer_id = ANY(%s)
+            """, (offer_ids,))
+            players_by_offer: dict[int, dict] = {}
+            for p in cur.fetchall():
+                oid = p["offer_id"]
+                if oid not in players_by_offer:
+                    players_by_offer[oid] = {"sender_gives": [], "receiver_gives": []}
+                players_by_offer[oid][p["direction"]].append({
+                    "player_name":     p["player_name"],
+                    "player_club":     p["player_club"],
+                    "player_position": p["player_position"],
+                })
+            for r in trade_rows:
+                oid = r["offer_id"]
+                r["sender_gives"]   = players_by_offer.get(oid, {}).get("sender_gives", [])
+                r["receiver_gives"] = players_by_offer.get(oid, {}).get("receiver_gives", [])
+        else:
+            for r in trade_rows:
+                r["sender_gives"]   = []
+                r["receiver_gives"] = []
+
+    # Merge and sort by event_time DESC, then truncate
+    combined = buy_sell_rows + trade_rows
+    combined.sort(key=lambda r: r["event_time"], reverse=True)
+    return combined[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Trade Offers
+# ---------------------------------------------------------------------------
+
+def create_trade_offer(
+    conn,
+    sender_id: int,
+    receiver_id: int,
+    sender_money: int,
+    receiver_money: int,
+    sender_player_ids: list[int],
+    receiver_player_ids: list[int],
+) -> dict:
+    """
+    Create a new pending trade offer from sender to receiver.
+
+    Validates:
+      - sender != receiver
+      - The offer is non-trivial (at least one asset changes hands)
+      - All sender_player_ids are currently on the sender's roster
+      - All receiver_player_ids are currently on the receiver's roster
+      - Money values are non-negative
+
+    Returns:
+        The created trade_offers row.
+
+    Raises:
+        ValueError: if any validation fails.
+    """
+    if sender_id == receiver_id:
+        raise ValueError("Cannot send a trade offer to yourself.")
+    if sender_money < 0 or receiver_money < 0:
+        raise ValueError("Money amounts cannot be negative.")
+    if sender_money == 0 and receiver_money == 0 and not sender_player_ids and not receiver_player_ids:
+        raise ValueError("An offer must include at least one player or a money amount.")
+
+    with conn.cursor() as cur:
+        # Fetch participant names
+        cur.execute(
+            "SELECT id, name FROM participants WHERE id = ANY(%s)",
+            ([sender_id, receiver_id],)
+        )
+        participants = {row["id"]: row["name"] for row in cur.fetchall()}
+        if sender_id not in participants:
+            raise ValueError("Sender participant not found.")
+        if receiver_id not in participants:
+            raise ValueError("Receiver participant not found.")
+
+        # Verify sender owns all offered players
+        if sender_player_ids:
+            cur.execute("""
+                SELECT p.id, p.name, p.club, p.position
+                FROM rosters r
+                JOIN players p ON p.id = r.player_id
+                WHERE r.participant_id = %s AND r.player_id = ANY(%s)
+            """, (sender_id, sender_player_ids))
+            owned = cur.fetchall()
+            if len(owned) != len(sender_player_ids):
+                raise ValueError("One or more players to offer are not on your roster.")
+            sender_player_details = {row["id"]: row for row in owned}
+        else:
+            sender_player_details = {}
+
+        # Verify receiver owns all requested players
+        if receiver_player_ids:
+            cur.execute("""
+                SELECT p.id, p.name, p.club, p.position
+                FROM rosters r
+                JOIN players p ON p.id = r.player_id
+                WHERE r.participant_id = %s AND r.player_id = ANY(%s)
+            """, (receiver_id, receiver_player_ids))
+            requested = cur.fetchall()
+            if len(requested) != len(receiver_player_ids):
+                raise ValueError("One or more requested players are not on that team's roster.")
+            receiver_player_details = {row["id"]: row for row in requested}
+        else:
+            receiver_player_details = {}
+
+        # Insert offer
+        cur.execute("""
+            INSERT INTO trade_offers
+                (sender_id, receiver_id, sender_name, receiver_name, sender_money, receiver_money)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id, sender_id, receiver_id, sender_name, receiver_name,
+                      sender_money, receiver_money, status, created_at
+        """, (
+            sender_id, receiver_id,
+            participants[sender_id], participants[receiver_id],
+            sender_money, receiver_money,
+        ))
+        offer = dict(cur.fetchone())
+        offer_id = offer["id"]
+
+        # Insert player rows
+        for pid in sender_player_ids:
+            p = sender_player_details[pid]
+            cur.execute("""
+                INSERT INTO trade_offer_players
+                    (offer_id, player_id, player_name, player_club, player_position, direction)
+                VALUES (%s, %s, %s, %s, %s, 'sender_gives')
+            """, (offer_id, pid, p["name"], p["club"], p["position"]))
+
+        for pid in receiver_player_ids:
+            p = receiver_player_details[pid]
+            cur.execute("""
+                INSERT INTO trade_offer_players
+                    (offer_id, player_id, player_name, player_club, player_position, direction)
+                VALUES (%s, %s, %s, %s, %s, 'receiver_gives')
+            """, (offer_id, pid, p["name"], p["club"], p["position"]))
+
+    conn.commit()
+    return offer
+
+
+def _get_offer_players(cur, offer_id: int) -> tuple[list[dict], list[dict]]:
+    """
+    Return (sender_gives, receiver_gives) player lists for an offer.
+    Used internally — must be called within an open cursor context.
+    """
+    cur.execute("""
+        SELECT player_id, player_name, player_club, player_position, direction
+        FROM trade_offer_players
+        WHERE offer_id = %s
+    """, (offer_id,))
+    sender_gives, receiver_gives = [], []
+    for row in cur.fetchall():
+        if row["direction"] == "sender_gives":
+            sender_gives.append(dict(row))
+        else:
+            receiver_gives.append(dict(row))
+    return sender_gives, receiver_gives
+
+
+def _enrich_offers(conn, offers: list[dict]) -> list[dict]:
+    """Attach sender_gives / receiver_gives player lists to each offer row."""
+    if not offers:
+        return offers
+    offer_ids = [o["id"] for o in offers]
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT offer_id, player_id, player_name, player_club, player_position, direction
+            FROM trade_offer_players
+            WHERE offer_id = ANY(%s)
+        """, (offer_ids,))
+        by_offer: dict[int, dict] = {}
+        for row in cur.fetchall():
+            oid = row["offer_id"]
+            if oid not in by_offer:
+                by_offer[oid] = {"sender_gives": [], "receiver_gives": []}
+            by_offer[oid][row["direction"]].append(dict(row))
+
+    result = []
+    for o in offers:
+        o = dict(o)
+        o["sender_gives"]   = by_offer.get(o["id"], {}).get("sender_gives", [])
+        o["receiver_gives"] = by_offer.get(o["id"], {}).get("receiver_gives", [])
+        result.append(o)
+    return result
+
+
+def get_trade_offers_received(conn, participant_id: int) -> list[dict]:
+    """
+    Return pending trade offers where this participant is the receiver,
+    enriched with player lists.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, sender_id, receiver_id, sender_name, receiver_name,
+                   sender_money, receiver_money, status, created_at, updated_at
+            FROM trade_offers
+            WHERE receiver_id = %s AND status = 'pending'
+            ORDER BY created_at DESC
+        """, (participant_id,))
+        offers = [dict(r) for r in cur.fetchall()]
+    return _enrich_offers(conn, offers)
+
+
+def get_trade_offers_sent(conn, participant_id: int) -> list[dict]:
+    """
+    Return all trade offers sent by this participant (any status), enriched
+    with player lists, newest first.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, sender_id, receiver_id, sender_name, receiver_name,
+                   sender_money, receiver_money, status, created_at, updated_at
+            FROM trade_offers
+            WHERE sender_id = %s
+            ORDER BY created_at DESC
+        """, (participant_id,))
+        offers = [dict(r) for r in cur.fetchall()]
+    return _enrich_offers(conn, offers)
+
+
+def count_pending_offers_received(conn, participant_id: int) -> int:
+    """Return the number of pending offers waiting for this participant to act on."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) AS cnt FROM trade_offers
+            WHERE receiver_id = %s AND status = 'pending'
+        """, (participant_id,))
+        return cur.fetchone()["cnt"]
+
+
+def accept_trade_offer(conn, offer_id: int, receiver_participant_id: int) -> None:
+    """
+    Accept a pending trade offer and execute the exchange atomically.
+
+    Validates:
+      - Offer exists and is still pending
+      - Caller is the offer's receiver
+      - All sender_gives players are still on the sender's roster
+      - All receiver_gives players are still on the receiver's roster
+      - Both parties have sufficient budget for any money component
+      - Roster caps are respected after the swap
+
+    Then:
+      - Moves sender_gives players from sender → receiver roster
+      - Moves receiver_gives players from receiver → sender roster
+      - Adjusts both budgets for any money component
+      - Marks offer as 'accepted'
+
+    Raises:
+        ValueError: if any validation fails.
+    """
+    with conn.cursor() as cur:
+        # Lock the offer row
+        cur.execute("""
+            SELECT id, sender_id, receiver_id, sender_money, receiver_money, status
+            FROM trade_offers
+            WHERE id = %s FOR UPDATE
+        """, (offer_id,))
+        offer = cur.fetchone()
+        if not offer:
+            raise ValueError("Trade offer not found.")
+        if offer["status"] != "pending":
+            raise ValueError("This offer is no longer pending.")
+        if offer["receiver_id"] != receiver_participant_id:
+            raise ValueError("You are not the recipient of this offer.")
+
+        sender_id   = offer["sender_id"]
+        receiver_id = offer["receiver_id"]
+
+        # Lock both participant rows
+        cur.execute("""
+            SELECT id, name, budget FROM participants
+            WHERE id = ANY(%s) FOR UPDATE
+        """, ([sender_id, receiver_id],))
+        participants = {row["id"]: dict(row) for row in cur.fetchall()}
+        sender   = participants[sender_id]
+        receiver = participants[receiver_id]
+
+        # Fetch players in each direction
+        sender_gives, receiver_gives = _get_offer_players(cur, offer_id)
+        sender_give_ids   = [p["player_id"] for p in sender_gives]
+        receiver_give_ids = [p["player_id"] for p in receiver_gives]
+
+        # Lock and validate sender_gives players still on sender's roster
+        if sender_give_ids:
+            cur.execute("""
+                SELECT r.player_id, p.current_value
+                FROM rosters r
+                JOIN players p ON p.id = r.player_id
+                WHERE r.participant_id = %s AND r.player_id = ANY(%s)
+                FOR UPDATE
+            """, (sender_id, sender_give_ids))
+            found = {row["player_id"]: row for row in cur.fetchall()}
+            for pid in sender_give_ids:
+                if pid not in found:
+                    name = next(p["player_name"] for p in sender_gives if p["player_id"] == pid)
+                    raise ValueError(
+                        f"{name} is no longer on {sender['name']}'s roster — the offer is invalid."
+                    )
+            sender_give_values = {pid: found[pid]["current_value"] for pid in sender_give_ids}
+        else:
+            sender_give_values = {}
+
+        # Lock and validate receiver_gives players still on receiver's roster
+        if receiver_give_ids:
+            cur.execute("""
+                SELECT r.player_id, p.current_value
+                FROM rosters r
+                JOIN players p ON p.id = r.player_id
+                WHERE r.participant_id = %s AND r.player_id = ANY(%s)
+                FOR UPDATE
+            """, (receiver_id, receiver_give_ids))
+            found = {row["player_id"]: row for row in cur.fetchall()}
+            for pid in receiver_give_ids:
+                if pid not in found:
+                    name = next(p["player_name"] for p in receiver_gives if p["player_id"] == pid)
+                    raise ValueError(
+                        f"{name} is no longer on {receiver['name']}'s roster — the offer is invalid."
+                    )
+            receiver_give_values = {pid: found[pid]["current_value"] for pid in receiver_give_ids}
+        else:
+            receiver_give_values = {}
+
+        # Validate budgets
+        sender_money   = offer["sender_money"]
+        receiver_money = offer["receiver_money"]
+        if sender["budget"] < sender_money:
+            raise ValueError(
+                f"{sender['name']} no longer has sufficient budget for this trade."
+            )
+        if receiver["budget"] < receiver_money:
+            raise ValueError(
+                f"{receiver['name']} no longer has sufficient budget for this trade."
+            )
+
+        # Validate roster caps after swap
+        cur.execute(
+            "SELECT COUNT(*) AS cnt FROM rosters WHERE participant_id = %s",
+            (sender_id,)
+        )
+        sender_count = cur.fetchone()["cnt"]
+        cur.execute(
+            "SELECT COUNT(*) AS cnt FROM rosters WHERE participant_id = %s",
+            (receiver_id,)
+        )
+        receiver_count = cur.fetchone()["cnt"]
+
+        sender_after   = sender_count   - len(sender_give_ids)   + len(receiver_give_ids)
+        receiver_after = receiver_count - len(receiver_give_ids) + len(sender_give_ids)
+
+        if sender_after > MAX_ROSTER_SIZE:
+            raise ValueError(
+                f"{sender['name']}'s roster would exceed the {MAX_ROSTER_SIZE}-player cap."
+            )
+        if receiver_after > MAX_ROSTER_SIZE:
+            raise ValueError(
+                f"{receiver['name']}'s roster would exceed the {MAX_ROSTER_SIZE}-player cap."
+            )
+
+        # Execute: move sender_gives players to receiver
+        for pid in sender_give_ids:
+            cur.execute(
+                "DELETE FROM rosters WHERE participant_id = %s AND player_id = %s",
+                (sender_id, pid)
+            )
+            cur.execute(
+                "INSERT INTO rosters (participant_id, player_id, purchased_at_value) VALUES (%s, %s, %s)",
+                (receiver_id, pid, sender_give_values[pid])
+            )
+
+        # Execute: move receiver_gives players to sender
+        for pid in receiver_give_ids:
+            cur.execute(
+                "DELETE FROM rosters WHERE participant_id = %s AND player_id = %s",
+                (receiver_id, pid)
+            )
+            cur.execute(
+                "INSERT INTO rosters (participant_id, player_id, purchased_at_value) VALUES (%s, %s, %s)",
+                (sender_id, pid, receiver_give_values[pid])
+            )
+
+        # Adjust budgets
+        # sender gives sender_money, receives receiver_money
+        cur.execute(
+            "UPDATE participants SET budget = budget - %s + %s WHERE id = %s",
+            (sender_money, receiver_money, sender_id)
+        )
+        # receiver gives receiver_money, receives sender_money
+        cur.execute(
+            "UPDATE participants SET budget = budget - %s + %s WHERE id = %s",
+            (receiver_money, sender_money, receiver_id)
+        )
+
+        # Mark offer accepted
+        cur.execute("""
+            UPDATE trade_offers
+            SET status = 'accepted', updated_at = NOW()
+            WHERE id = %s
+        """, (offer_id,))
+
+    conn.commit()
+
+
+def decline_trade_offer(conn, offer_id: int, receiver_participant_id: int) -> None:
+    """
+    Decline a pending trade offer. Only the receiver can decline.
+
+    Raises:
+        ValueError: if validation fails.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT receiver_id, status FROM trade_offers WHERE id = %s FOR UPDATE",
+            (offer_id,)
+        )
+        offer = cur.fetchone()
+        if not offer:
+            raise ValueError("Trade offer not found.")
+        if offer["status"] != "pending":
+            raise ValueError("This offer is no longer pending.")
+        if offer["receiver_id"] != receiver_participant_id:
+            raise ValueError("You are not the recipient of this offer.")
+
+        cur.execute("""
+            UPDATE trade_offers
+            SET status = 'declined', updated_at = NOW()
+            WHERE id = %s
+        """, (offer_id,))
+    conn.commit()
+
+
+def cancel_trade_offer(conn, offer_id: int, sender_participant_id: int) -> None:
+    """
+    Cancel a pending trade offer. Only the sender can cancel.
+
+    Raises:
+        ValueError: if validation fails.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sender_id, status FROM trade_offers WHERE id = %s FOR UPDATE",
+            (offer_id,)
+        )
+        offer = cur.fetchone()
+        if not offer:
+            raise ValueError("Trade offer not found.")
+        if offer["status"] != "pending":
+            raise ValueError("This offer is no longer pending.")
+        if offer["sender_id"] != sender_participant_id:
+            raise ValueError("You are not the sender of this offer.")
+
+        cur.execute("""
+            UPDATE trade_offers
+            SET status = 'cancelled', updated_at = NOW()
+            WHERE id = %s
+        """, (offer_id,))
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Leaderboard
 # ---------------------------------------------------------------------------
