@@ -19,10 +19,8 @@ jobs:
       - name: Install uv and dependencies
         run: pip install uv && uv sync
 
-      - name: Refresh player values from Kaggle dataset
+      - name: Refresh player values via ceapi
         run: uv run python scraper.py
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-          DATA_SOURCE: kaggle
+          DATA_SOURCE: ceapi

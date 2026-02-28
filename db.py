@@ -121,6 +121,7 @@ def insert_player(conn, name: str, club: str, position: str,
 
 
 _SOURCE_COLS = {
+    "ceapi":         ("ceapi_value",         "ceapi_last_updated"),
     "kaggle":        ("kaggle_value",        "kaggle_last_updated"),
     "transfermarkt": ("transfermarkt_value", "transfermarkt_last_updated"),
 }

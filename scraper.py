@@ -29,14 +29,14 @@ from bs4 import BeautifulSoup
 # Data source selection
 # ---------------------------------------------------------------------------
 
-DATA_SOURCE = os.environ.get("DATA_SOURCE", "kaggle")  # "kaggle" | "transfermarkt"
+DATA_SOURCE = os.environ.get("DATA_SOURCE", "ceapi")  # "ceapi" | "kaggle" | "transfermarkt"
 
 
 def set_data_source(source: str) -> None:
     """Switch the active data acquisition backend at runtime."""
     global DATA_SOURCE
-    if source not in ("kaggle", "transfermarkt"):
-        raise ValueError(f"Unknown data source: {source!r}. Must be 'kaggle' or 'transfermarkt'.")
+    if source not in ("ceapi", "kaggle", "transfermarkt"):
+        raise ValueError(f"Unknown data source: {source!r}. Must be 'ceapi', 'kaggle', or 'transfermarkt'.")
     DATA_SOURCE = source
 
 
@@ -66,6 +66,8 @@ def scrape_player(url: str, session: requests.Session = None) -> dict:
         ValueError: if the player can't be found or the page can't be parsed.
         requests.HTTPError: if a live scrape fails (transfermarkt source only).
     """
+    if DATA_SOURCE == "ceapi":
+        return _lookup_player_ceapi(url)
     if DATA_SOURCE == "kaggle":
         return _lookup_player_kaggle(url)
     return _scrape_player_transfermarkt(url, session=session)
@@ -75,8 +77,10 @@ def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -
     """
     Update the current market value for every player in the database.
 
-    Uses DATA_SOURCE to decide whether to query the Kaggle dataset or
-    scrape Transfermarkt directly.
+    Uses DATA_SOURCE to decide which backend to use:
+      - "ceapi"        : fetches real-time values from Transfermarkt's internal API.
+      - "kaggle"       : uses the weekly Kaggle dataset.
+      - "transfermarkt": scrapes the HTML page directly.
 
     Args:
         conn: An open psycopg2 database connection.
@@ -89,6 +93,8 @@ def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -
         A list of dicts summarising the result for each player:
         {"name": ..., "old_value": ..., "new_value": ..., "success": bool, "error": ...}
     """
+    if DATA_SOURCE == "ceapi":
+        return _refresh_via_ceapi(conn, on_player_done=on_player_done)
     if DATA_SOURCE == "kaggle":
         return _refresh_via_kaggle(conn, on_player_done=on_player_done)
     return _refresh_via_transfermarkt(conn, delay_range=delay_range, on_player_done=on_player_done)
@@ -224,6 +230,137 @@ def _refresh_via_kaggle(conn, on_player_done=None) -> list[dict]:
         results.append(result)
         if on_player_done:
             on_player_done(i + 1, total, result)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Transfermarkt ceapi backend — real-time JSON endpoint, no Cloudflare block
+# ---------------------------------------------------------------------------
+
+_CEAPI_BASE = "https://www.transfermarkt.com/ceapi/marketValueDevelopment/graph"
+
+
+def _fetch_ceapi_value(player_id: int) -> int:
+    """
+    Fetch the current market value for a player from Transfermarkt's internal
+    ceapi JSON endpoint.
+
+    The endpoint returns a market-value history list ordered chronologically.
+    The last entry is the most recent value. The `y` field is the integer
+    value in euros; `mw` is the human-readable string (e.g. "€45.00m").
+
+    Returns:
+        The current market value in euros as an integer.
+
+    Raises:
+        ValueError: if the response doesn't contain expected data.
+        requests.HTTPError: if the HTTP request fails.
+    """
+    url = f"{_CEAPI_BASE}/{player_id}"
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    response = session.get(url, timeout=10)
+    response.raise_for_status()
+
+    data = response.json()
+    value_list = data.get("list", [])
+    if not value_list:
+        raise ValueError(f"No market value data returned for player ID {player_id}.")
+
+    # List is sorted chronologically; last entry is most recent
+    latest = value_list[-1]
+
+    # The 'y' field is already the integer value in euros
+    if latest.get("y"):
+        return int(latest["y"])
+
+    # Fall back to parsing the human-readable 'mw' string
+    if latest.get("mw"):
+        return _parse_value_string(latest["mw"])
+
+    raise ValueError(f"Could not extract market value from ceapi response for player ID {player_id}.")
+
+
+def _lookup_player_ceapi(url: str) -> dict:
+    """
+    Look up a player using ceapi for real-time value and Kaggle for metadata.
+
+    The ceapi endpoint only returns market value history, not name/club/position.
+    We get those from the Kaggle cache (already downloaded) and override the
+    value with the ceapi result. Falls back to HTML scraping for metadata if
+    the Kaggle cache is unavailable.
+    """
+    url = _normalize_url(url)
+    player_id = _get_player_id(url)
+
+    current_value = _fetch_ceapi_value(player_id)
+
+    # Prefer Kaggle cache for metadata (name, club, position)
+    try:
+        import pandas as pd
+        _ensure_cache_fresh()
+        players_df, clubs_df = _load_dataframes()
+
+        player_rows = players_df[players_df["player_id"] == player_id]
+        if not player_rows.empty:
+            player = player_rows.iloc[0]
+
+            club = "Unknown"
+            club_id = player.get("current_club_id")
+            if club_id and not pd.isna(club_id):
+                club_rows = clubs_df[clubs_df["club_id"] == int(club_id)]
+                if not club_rows.empty:
+                    club = club_rows.iloc[0]["name"]
+
+            position = player.get("position", "Unknown")
+            if not isinstance(position, str):
+                position = "Unknown"
+
+            return {
+                "name": player["name"],
+                "club": club,
+                "position": position,
+                "current_value": current_value,
+                "transfermrkt_url": url,
+            }
+    except Exception:
+        pass
+
+    # Fallback: HTML scrape for metadata only, then override value
+    data = _scrape_player_transfermarkt(url)
+    data["current_value"] = current_value
+    return data
+
+
+def _refresh_via_ceapi(conn, on_player_done=None) -> list[dict]:
+    """Refresh all player values using Transfermarkt's ceapi JSON endpoint."""
+    db_players = db.get_all_players(conn)
+    results = []
+    total = len(db_players)
+
+    for i, player in enumerate(db_players):
+        result = {"name": player["name"], "old_value": player["current_value"]}
+        try:
+            player_id = _get_player_id(player["transfermrkt_url"])
+            new_value = _fetch_ceapi_value(player_id)
+            db.update_player_value(conn, player["id"], new_value, source="ceapi")
+            result["new_value"] = new_value
+            result["success"] = True
+            result["error"] = None
+        except Exception as e:
+            result["new_value"] = player["current_value"]
+            result["success"] = False
+            result["error"] = str(e)
+
+        results.append(result)
+        if on_player_done:
+            on_player_done(i + 1, total, result)
+
+        # Small delay between requests to be polite
+        if i < total - 1:
+            time.sleep(random.uniform(1, 3))
 
     return results
 
