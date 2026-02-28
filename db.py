@@ -127,6 +127,16 @@ _SOURCE_COLS = {
 }
 
 
+def update_player_club_position(conn, player_id: int, club: str, position: str) -> None:
+    """Update a player's club and position."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE players SET club = %s, position = %s WHERE id = %s",
+            (club, position, player_id)
+        )
+    conn.commit()
+
+
 def update_player_value(conn, player_id: int, new_value: int, source: str = "kaggle") -> None:
     """
     Update a player's current_value and the source-specific value column.
