@@ -98,7 +98,7 @@ def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -
 # Kaggle dataset backend
 # ---------------------------------------------------------------------------
 
-_KAGGLE_DATASET = "davidcaribou/transfermarkt-datasets"
+_KAGGLE_DATASET = "davidcariboo/player-scores"
 _CACHE_DIR = Path(__file__).parent / "data" / "transfermarkt_cache"
 _CACHE_MAX_AGE_DAYS = 7
 _CACHE_MARKER = _CACHE_DIR / ".last_updated"
