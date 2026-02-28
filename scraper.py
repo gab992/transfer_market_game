@@ -444,11 +444,10 @@ def _parse_value_string(raw: str) -> int:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import psycopg2
     from dotenv import load_dotenv
 
     load_dotenv()
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    conn = db.get_connection(os.environ["DATABASE_URL"])
 
     def log_progress(idx, total, result):
         status = "OK" if result["success"] else f"FAILED ({result['error']})"
