@@ -241,17 +241,22 @@ def _refresh_via_kaggle(conn, on_player_done=None) -> list[dict]:
 _CEAPI_BASE = "https://www.transfermarkt.com/ceapi/marketValueDevelopment/graph"
 
 
-def _fetch_ceapi_value(player_id: int) -> int:
+def _fetch_ceapi_data(player_id: int) -> dict:
     """
-    Fetch the current market value for a player from Transfermarkt's internal
-    ceapi JSON endpoint.
+    Fetch the current market value and club for a player from Transfermarkt's
+    internal ceapi JSON endpoint.
 
     The endpoint returns a market-value history list ordered chronologically.
-    The last entry is the most recent value. The `y` field is the integer
-    value in euros; `mw` is the human-readable string (e.g. "€45.00m").
+    Each entry includes:
+      - `y`      : integer value in euros
+      - `mw`     : human-readable string (e.g. "€45.00m")
+      - `verein` : club name at that point in time
+
+    The last entry is the most recent.
 
     Returns:
-        The current market value in euros as an integer.
+        Dict with keys: value (int), club (str), position (str).
+        position is "Unknown" if not present in the response.
 
     Raises:
         ValueError: if the response doesn't contain expected data.
@@ -272,15 +277,26 @@ def _fetch_ceapi_value(player_id: int) -> int:
     # List is sorted chronologically; last entry is most recent
     latest = value_list[-1]
 
-    # The 'y' field is already the integer value in euros
+    # Extract value
     if latest.get("y"):
-        return int(latest["y"])
+        value = int(latest["y"])
+    elif latest.get("mw"):
+        value = _parse_value_string(latest["mw"])
+    else:
+        raise ValueError(f"Could not extract market value from ceapi response for player ID {player_id}.")
 
-    # Fall back to parsing the human-readable 'mw' string
-    if latest.get("mw"):
-        return _parse_value_string(latest["mw"])
+    # Club is stored per-entry as `verein` (German for "club")
+    club = latest.get("verein") or "Unknown"
 
-    raise ValueError(f"Could not extract market value from ceapi response for player ID {player_id}.")
+    # Position may appear at the top level of the response
+    position = data.get("pos") or data.get("position") or "Unknown"
+
+    return {"value": value, "club": club, "position": position}
+
+
+def _fetch_ceapi_value(player_id: int) -> int:
+    """Return only the current market value from the ceapi endpoint."""
+    return _fetch_ceapi_data(player_id)["value"]
 
 
 def _lookup_player_ceapi(url: str) -> dict:
@@ -335,7 +351,7 @@ def _lookup_player_ceapi(url: str) -> dict:
 
 
 def _refresh_via_ceapi(conn, on_player_done=None) -> list[dict]:
-    """Refresh all player values using Transfermarkt's ceapi JSON endpoint."""
+    """Refresh all player values, clubs, and positions using Transfermarkt's ceapi JSON endpoint."""
     db_players = db.get_all_players(conn)
     results = []
     total = len(db_players)
@@ -344,9 +360,10 @@ def _refresh_via_ceapi(conn, on_player_done=None) -> list[dict]:
         result = {"name": player["name"], "old_value": player["current_value"]}
         try:
             player_id = _get_player_id(player["transfermrkt_url"])
-            new_value = _fetch_ceapi_value(player_id)
-            db.update_player_value(conn, player["id"], new_value, source="ceapi")
-            result["new_value"] = new_value
+            ceapi_data = _fetch_ceapi_data(player_id)
+            db.update_player_value(conn, player["id"], ceapi_data["value"], source="ceapi")
+            db.update_player_club_position(conn, player["id"], ceapi_data["club"], ceapi_data["position"])
+            result["new_value"] = ceapi_data["value"]
             result["success"] = True
             result["error"] = None
         except Exception as e:
