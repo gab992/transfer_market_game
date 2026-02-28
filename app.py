@@ -51,7 +51,7 @@ conn = get_conn()
 # Auth gate — nothing below renders until the user is logged in
 # ---------------------------------------------------------------------------
 
-st.title("⚽ Transfer Market Fantasy Game")
+st.title("Footy Ball Money Man Fantasy Game")
 auth.require_login(conn)
 
 # From here on, auth.current_user() is guaranteed to be set.
@@ -76,7 +76,13 @@ with st.sidebar:
 
     st.divider()
 
-    pages = ["Leaderboard", "My Team", "Market", "Milestones", "Feed"]
+    # Show a badge on the Offers page if there are pending incoming offers
+    _pending_offer_count = 0
+    if user.get("participant_id"):
+        _pending_offer_count = db.count_pending_offers_received(conn, user["participant_id"])
+    offers_label = f"Offers ({_pending_offer_count})" if _pending_offer_count else "Offers"
+
+    pages = ["Leaderboard", "My Team", "Market", offers_label, "Milestones", "Feed"]
     if auth.is_admin():
         pages.append("Admin")
 
@@ -518,51 +524,267 @@ def page_milestones():
 
 
 # ---------------------------------------------------------------------------
+# Page: Offers — direct trade offers between participants
+# ---------------------------------------------------------------------------
+
+def _fmt_offer_side(players: list[dict], money: int) -> str:
+    """Return a human-readable summary of one side of a trade offer.
+
+    Player dicts from trade_offer_players use player_name / player_club /
+    player_position keys (denormalised), so we map them before calling
+    player_subtitle.
+    """
+    parts = []
+    for p in players:
+        # trade_offer_players dicts use player_* keys; map to the keys
+        # player_subtitle expects (club, position)
+        subtitle_dict = {
+            "club":     p.get("player_club"),
+            "position": p.get("player_position"),
+        }
+        sub = player_subtitle(subtitle_dict)
+        parts.append(f"**{p['player_name']}**" + (f" ({sub})" if sub else ""))
+    if money:
+        parts.append(fmt_euros(money))
+    return ", ".join(parts) if parts else "nothing"
+
+
+def page_offers():
+    st.header("Offers")
+
+    participant_id = user["participant_id"]
+    if not participant_id:
+        st.info("Your account is not linked to a participant. Ask the admin to link your account to your team.")
+        return
+
+    # Block during an active draft
+    active_draft = db.get_active_draft(conn)
+    if active_draft:
+        st.warning("Trade offers are paused while a draft is active.")
+        return
+
+    participant = db.get_participant(conn, participant_id)
+
+    # ------------------------------------------------------------------ #
+    # Section 1: Received offers (pending)
+    # ------------------------------------------------------------------ #
+    st.subheader("Received Offers")
+    received = db.get_trade_offers_received(conn, participant_id)
+
+    if not received:
+        st.info("No pending offers.")
+    else:
+        for offer in received:
+            sg_str = _fmt_offer_side(offer["sender_gives"],   offer["sender_money"])
+            rg_str = _fmt_offer_side(offer["receiver_gives"], offer["receiver_money"])
+            with st.container(border=True):
+                st.markdown(
+                    f"**{offer['sender_name']}** wants to trade with you  \n"
+                    f"They give: {sg_str}  \n"
+                    f"You give: {rg_str}"
+                )
+                col_acc, col_dec = st.columns(2)
+                with col_acc:
+                    if st.button("Accept", key=f"accept_{offer['id']}", type="primary"):
+                        try:
+                            db.accept_trade_offer(conn, offer["id"], participant_id)
+                            st.success("Trade accepted!")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+                with col_dec:
+                    if st.button("Decline", key=f"decline_{offer['id']}"):
+                        try:
+                            db.decline_trade_offer(conn, offer["id"], participant_id)
+                            st.success("Offer declined.")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+
+    st.divider()
+
+    # ------------------------------------------------------------------ #
+    # Section 2: Sent offers
+    # ------------------------------------------------------------------ #
+    st.subheader("My Sent Offers")
+    sent = db.get_trade_offers_sent(conn, participant_id)
+    pending_sent = [o for o in sent if o["status"] == "pending"]
+
+    if not pending_sent:
+        st.info("No pending sent offers.")
+    else:
+        for offer in pending_sent:
+            sg_str = _fmt_offer_side(offer["sender_gives"],   offer["sender_money"])
+            rg_str = _fmt_offer_side(offer["receiver_gives"], offer["receiver_money"])
+            with st.container(border=True):
+                st.markdown(
+                    f"To **{offer['receiver_name']}** — awaiting response  \n"
+                    f"You give: {sg_str}  \n"
+                    f"They give: {rg_str}"
+                )
+                if st.button("Cancel offer", key=f"cancel_{offer['id']}"):
+                    try:
+                        db.cancel_trade_offer(conn, offer["id"], participant_id)
+                        st.success("Offer cancelled.")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+
+    st.divider()
+
+    # ------------------------------------------------------------------ #
+    # Section 3: Make an offer
+    # ------------------------------------------------------------------ #
+    st.subheader("Make an Offer")
+
+    all_participants = db.get_participants(conn)
+    others = [p for p in all_participants if p["id"] != participant_id]
+
+    if not others:
+        st.info("No other participants to trade with yet.")
+        return
+
+    my_roster = db.get_roster(conn, participant_id)
+
+    target_options = {p["name"]: p["id"] for p in others}
+    target_name = st.selectbox("Send offer to", options=list(target_options.keys()))
+    target_id = target_options[target_name]
+    their_roster = db.get_roster(conn, target_id)
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.markdown(f"**You give** (your team)")
+        my_player_options = {p["name"]: p["id"] for p in my_roster}
+        my_selected_names = st.multiselect(
+            "Players you're offering",
+            options=list(my_player_options.keys()),
+            key="offer_my_players",
+        )
+        my_selected_ids = [my_player_options[n] for n in my_selected_names]
+        sender_money = st.number_input(
+            "Money you're giving (€)",
+            min_value=0,
+            max_value=int(participant["budget"]),
+            value=0,
+            step=1_000_000,
+            key="offer_sender_money",
+        )
+
+    with col_right:
+        st.markdown(f"**You receive** (from {target_name})")
+        their_player_options = {p["name"]: p["id"] for p in their_roster}
+        their_selected_names = st.multiselect(
+            "Players you're requesting",
+            options=list(their_player_options.keys()),
+            key="offer_their_players",
+        )
+        their_selected_ids = [their_player_options[n] for n in their_selected_names]
+        receiver_money = st.number_input(
+            "Money you're requesting (€)",
+            min_value=0,
+            value=0,
+            step=1_000_000,
+            key="offer_receiver_money",
+        )
+
+    offer_is_empty = (
+        not my_selected_ids and not their_selected_ids
+        and sender_money == 0 and receiver_money == 0
+    )
+
+    if st.button(
+        f"Send Offer to {target_name}",
+        disabled=offer_is_empty,
+        help="Add at least one player or a money amount to the offer." if offer_is_empty else None,
+    ):
+        try:
+            db.create_trade_offer(
+                conn,
+                sender_id=participant_id,
+                receiver_id=target_id,
+                sender_money=int(sender_money),
+                receiver_money=int(receiver_money),
+                sender_player_ids=my_selected_ids,
+                receiver_player_ids=their_selected_ids,
+            )
+            st.success(f"Offer sent to {target_name}!")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+
+
+# ---------------------------------------------------------------------------
 # Page: Feed — dated log of all transfers across participants
 # ---------------------------------------------------------------------------
 
 def page_feed():
-    st.header("Transfer Feed")
-    st.caption("A live log of every buy and sell across all participants.")
+    st.header("Activity Feed")
+    st.caption("A live log of all transfers and trade offers.")
 
-    transfers = db.get_transfer_feed(conn)
-
-    if not transfers:
-        st.info("No transfers yet. Moves will appear here once players are bought or sold.")
-        return
-
-    # Group entries by date for a clean dated timeline
     from collections import defaultdict
     import datetime
 
+    events = db.get_combined_feed(conn)
+
+    if not events:
+        st.info("No activity yet. Moves will appear here once players are bought, sold, or traded.")
+        return
+
+    # Group entries by date for a clean dated timeline
     grouped: dict[datetime.date, list] = defaultdict(list)
-    for t in transfers:
-        day = t["transferred_at"].date()
-        grouped[day].append(t)
+    for e in events:
+        day = e["event_time"].date()
+        grouped[day].append(e)
 
     for day in sorted(grouped.keys(), reverse=True):
         st.subheader(day.strftime("%-d %B %Y"))
-        for t in grouped[day]:
-            time_str = t["transferred_at"].strftime("%H:%M")
-            is_buy = t["transfer_type"] == "buy"
-            action_icon = "🟢" if is_buy else "🔴"
-            action_word = "bought" if is_buy else "sold"
-            value_str = fmt_euros(t["value"])
-            subtitle = f"{t['player_club']} · {t['player_position']}"
+        for e in grouped[day]:
+            time_str = e["event_time"].strftime("%H:%M")
 
             col1, col2 = st.columns([5, 1])
-            with col1:
-                st.markdown(
-                    f"{action_icon} **{t['participant_name']}** {action_word} "
-                    f"**{t['player_name']}** <span style='color:gray;font-size:0.85em'>({subtitle})</span> "
-                    f"for **{value_str}**",
-                    unsafe_allow_html=True,
-                )
             with col2:
                 st.markdown(
                     f"<span style='color:gray;font-size:0.85em'>{time_str}</span>",
                     unsafe_allow_html=True,
                 )
+
+            with col1:
+                if e["event_type"] == "buy_sell":
+                    is_buy = e["transfer_type"] == "buy"
+                    action_icon = "🟢" if is_buy else "🔴"
+                    action_word = "bought" if is_buy else "sold"
+                    value_str = fmt_euros(e["value"])
+                    subtitle = f"{e['player_club']} · {e['player_position']}"
+                    st.markdown(
+                        f"{action_icon} **{e['participant_name']}** {action_word} "
+                        f"**{e['player_name']}** <span style='color:gray;font-size:0.85em'>({subtitle})</span> "
+                        f"for **{value_str}**",
+                        unsafe_allow_html=True,
+                    )
+
+                else:  # trade_offer
+                    status = e["status"]
+                    sender   = e["sender_name"]
+                    receiver = e["receiver_name"]
+                    sg_str = _fmt_offer_side(e.get("sender_gives", []),   e["sender_money"])
+                    rg_str = _fmt_offer_side(e.get("receiver_gives", []), e["receiver_money"])
+
+                    if status == "pending":
+                        st.markdown(
+                            f"🔄 **{sender}** proposed a trade with **{receiver}**  \n"
+                            f"<span style='color:gray;font-size:0.85em'>"
+                            f"{sender} gives: {sg_str} · {receiver} gives: {rg_str} · "
+                            f"<em>Awaiting response</em></span>",
+                            unsafe_allow_html=True,
+                        )
+                    elif status == "accepted":
+                        st.markdown(
+                            f"✅ **{sender}** and **{receiver}** completed a trade  \n"
+                            f"<span style='color:gray;font-size:0.85em'>"
+                            f"{sender} gave: {sg_str} · {receiver} gave: {rg_str}</span>",
+                            unsafe_allow_html=True,
+                        )
 
         st.divider()
 
@@ -1029,6 +1251,8 @@ elif page == "My Team":
     page_my_team()
 elif page == "Market":
     page_market()
+elif page in ("Offers", offers_label):
+    page_offers()
 elif page == "Milestones":
     page_milestones()
 elif page == "Feed":
