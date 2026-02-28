@@ -20,7 +20,6 @@ from dotenv import load_dotenv
 import db
 import auth
 import scraper
-import fotmob_scraper
 
 load_dotenv()
 
@@ -860,173 +859,46 @@ def page_admin():
 
     # ---- Section: Market Values ----
     st.subheader("Market Values")
-
-    all_players_fm = db.get_all_players_with_fotmob(conn)
-    value_source = db.get_game_setting(conn, "value_source") or "transfermrkt"
-
-    # Source selector
-    source_label_map = {"transfermrkt": "Transfermarkt", "fotmob": "FotMob"}
-    new_source = st.radio(
-        "Active value source",
-        options=["transfermrkt", "fotmob"],
-        format_func=lambda s: source_label_map[s],
-        index=0 if value_source == "transfermrkt" else 1,
-        horizontal=True,
-        help="Controls which scraped values are used as the live market values seen by all participants.",
+    st.caption(
+        "Re-scrape current market values for all players from Transfermarkt. "
+        "Requests are spaced 15–45 seconds apart to avoid bot detection — expect roughly 30 seconds per player."
     )
 
-    if new_source != value_source:
-        if st.button("Apply Source Switch", type="primary"):
-            fotmob_linked = sum(1 for p in all_players_fm if p.get("fotmob_url"))
-            fotmob_valued = sum(1 for p in all_players_fm if p.get("fotmob_value"))
-            if new_source == "fotmob" and fotmob_valued == 0:
-                st.warning(
-                    "No FotMob values have been scraped yet. "
-                    "Run a FotMob refresh first, then switch the source."
-                )
-            elif new_source == "fotmob" and fotmob_linked == 0:
-                st.warning(
-                    "No players have FotMob URLs linked. "
-                    "Add FotMob URLs in the section below, run a refresh, then switch."
-                )
-            else:
-                db.set_value_source(conn, new_source)
-                st.success(f"Source switched to {source_label_map[new_source]}.")
-                st.rerun()
+    all_players = db.get_all_players(conn)
 
-    st.divider()
-
-    if not all_players_fm:
+    if not all_players:
         st.info("No players in the database yet.")
     else:
-        # Timestamps
-        tm_last = max(
-            (p["last_updated"] for p in all_players_fm if p.get("last_updated") and not p.get("fotmob_value")),
-            default=max(
-                (p["last_updated"] for p in all_players_fm if p.get("last_updated")),
-                default=None,
-            ),
-        )
-        fotmob_last = max(
-            (p["fotmob_last_updated"] for p in all_players_fm if p.get("fotmob_last_updated")),
+        last_updated = max(
+            (p["last_updated"] for p in all_players if p["last_updated"]),
             default=None,
         )
+        if last_updated:
+            st.caption(f"Last updated: {last_updated.strftime('%d %b %Y at %H:%M UTC')}")
 
-        col_tm, col_fm = st.columns(2)
+        if st.button(f"Refresh All Player Values ({len(all_players)} players)"):
+            refresh_results = []
 
-        with col_tm:
-            st.markdown("**Transfermarkt**")
-            if tm_last:
-                st.caption(f"Last scraped: {tm_last.strftime('%d %b %Y at %H:%M UTC')}")
-            else:
-                st.caption("Never scraped")
-            st.caption(
-                "Spaced 15–45 s apart to avoid bot detection — ~30 s per player."
-            )
-            if st.button(f"Refresh Transfermarkt Values ({len(all_players_fm)} players)", key="btn_refresh_tm"):
-                tm_results = []
-
-                def _on_tm_done(idx, total, result):
-                    tm_results.append(result)
-                    tm_bar.progress(idx / total)
-                    icon = "✓" if result["success"] else "✗"
-                    tm_log.write(f"{icon} [{idx}/{total}] {result['name']}")
-
-                with st.status(f"Refreshing {len(all_players_fm)} player(s) from Transfermarkt...", expanded=True) as tm_status:
-                    tm_log = st.empty()
-                    tm_bar = st.progress(0)
-                    scraper.refresh_all_player_values(conn, on_player_done=_on_tm_done)
-                    db.set_game_setting(conn, "value_source", "transfermrkt")
-                    tm_status.update(label="Transfermarkt refresh complete.", state="complete", expanded=False)
-
-                ok = sum(1 for r in tm_results if r["success"])
-                fail = len(tm_results) - ok
-                if fail:
-                    st.warning(f"Updated {ok} player(s). {fail} failed.")
+            def _on_player_done(idx, total, result):
+                refresh_results.append(result)
+                progress_bar.progress(idx / total)
+                if result["success"]:
+                    status_log.write(f"✓ [{idx}/{total}] {result['name']}")
                 else:
-                    st.success(f"All {ok} player(s) updated from Transfermarkt.")
-                st.rerun()
+                    status_log.write(f"✗ [{idx}/{total}] {result['name']}: {result['error']}")
 
-        with col_fm:
-            st.markdown("**FotMob**")
-            fotmob_linked = [p for p in all_players_fm if p.get("fotmob_url")]
-            if fotmob_last:
-                st.caption(f"Last scraped: {fotmob_last.strftime('%d %b %Y at %H:%M UTC')}")
+            with st.status(f"Refreshing {len(all_players)} player(s)...", expanded=True) as status_box:
+                status_log = st.empty()
+                progress_bar = st.progress(0)
+                scraper.refresh_all_player_values(conn, on_player_done=_on_player_done)
+                status_box.update(label="Refresh complete.", state="complete", expanded=False)
+
+            successes = sum(1 for r in refresh_results if r["success"])
+            failures = len(refresh_results) - successes
+            if failures:
+                st.warning(f"Updated {successes} player(s). {failures} failed.")
             else:
-                st.caption("Never scraped")
-            st.caption(
-                f"{len(fotmob_linked)} of {len(all_players_fm)} players have a FotMob URL. "
-                "Spaced 15–45 s apart."
-            )
-            if not fotmob_linked:
-                st.info("Link FotMob URLs to players in the section below before running a refresh.")
-            else:
-                if st.button(f"Refresh FotMob Values ({len(fotmob_linked)} players)", key="btn_refresh_fm"):
-                    fm_results = []
-
-                    def _on_fm_done(idx, total, result):
-                        fm_results.append(result)
-                        fm_bar.progress(idx / total)
-                        icon = "✓" if result["success"] else "✗"
-                        fm_log.write(f"{icon} [{idx}/{total}] {result['name']}")
-
-                    with st.status(f"Refreshing {len(fotmob_linked)} player(s) from FotMob...", expanded=True) as fm_status:
-                        fm_log = st.empty()
-                        fm_bar = st.progress(0)
-                        fotmob_scraper.refresh_all_fotmob_values(conn, on_player_done=_on_fm_done)
-                        db.set_game_setting(conn, "value_source", "fotmob")
-                        fm_status.update(label="FotMob refresh complete.", state="complete", expanded=False)
-
-                    ok = sum(1 for r in fm_results if r["success"])
-                    fail = len(fm_results) - ok
-                    if fail:
-                        st.warning(f"Updated {ok} player(s). {fail} failed.")
-                    else:
-                        st.success(f"All {ok} player(s) updated from FotMob.")
-                    st.rerun()
-
-    st.divider()
-
-    # ---- Section: FotMob Player Links ----
-    st.subheader("FotMob Player Links")
-    st.caption(
-        "Link each player to their FotMob profile URL so FotMob values can be scraped. "
-        "Example: https://www.fotmob.com/players/418560/erling-haaland"
-    )
-
-    all_players_fm2 = db.get_all_players_with_fotmob(conn)
-
-    if not all_players_fm2:
-        st.info("No players in the database yet.")
-    else:
-        linked_count = sum(1 for p in all_players_fm2 if p.get("fotmob_url"))
-        st.caption(f"{linked_count} of {len(all_players_fm2)} players linked.")
-
-        for player in all_players_fm2:
-            with st.form(f"fotmob_url_{player['id']}"):
-                col_name, col_input, col_save = st.columns([2, 4, 1])
-                with col_name:
-                    st.markdown(f"**{player['name']}**")
-                    if player.get("fotmob_value"):
-                        st.caption(f"FotMob value: {fmt_euros(player['fotmob_value'])}")
-                with col_input:
-                    new_url = st.text_input(
-                        "FotMob URL",
-                        value=player.get("fotmob_url") or "",
-                        placeholder="https://www.fotmob.com/players/...",
-                        label_visibility="collapsed",
-                        key=f"fotmob_url_input_{player['id']}",
-                    )
-                with col_save:
-                    submitted = st.form_submit_button("Save")
-
-                if submitted:
-                    cleaned = new_url.strip()
-                    if cleaned and not cleaned.startswith("https://www.fotmob.com/players/"):
-                        st.error("URL must start with https://www.fotmob.com/players/")
-                    else:
-                        db.update_player_fotmob_url(conn, player["id"], cleaned or None)
-                        st.rerun()
+                st.success(f"All {successes} player(s) updated successfully.")
 
     st.divider()
 
