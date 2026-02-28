@@ -3,3 +3,4 @@
 __pycache__/
 *.pyc
 create_admin_supabase.py
+data/

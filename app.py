@@ -23,6 +23,15 @@ import scraper
 
 load_dotenv()
 
+# Expose Kaggle credentials from st.secrets as env vars so the kaggle library
+# can authenticate. st.secrets doesn't set os.environ automatically.
+for _kaggle_key in ("KAGGLE_USERNAME", "KAGGLE_KEY"):
+    if _kaggle_key not in os.environ:
+        try:
+            os.environ[_kaggle_key] = st.secrets[_kaggle_key]
+        except Exception:
+            pass  # Not set in secrets — will fall back to ~/.kaggle/kaggle.json or fail at auth time
+
 st.set_page_config(page_title="Transfer Market Game", page_icon="⚽", layout="wide")
 
 
@@ -441,7 +450,7 @@ def page_market():
                     st.rerun()
                 else:
                     try:
-                        updated = db.buy_new_player(conn, participant_id, data)
+                        updated = db.buy_new_player(conn, participant_id, data, source=scraper.DATA_SOURCE)
                         if active_draft:
                             db.advance_draft(conn, active_draft["id"])
                         st.success(
@@ -1087,10 +1096,27 @@ def page_admin():
 
     # ---- Section: Market Values ----
     st.subheader("Market Values")
-    st.caption(
-        "Re-scrape current market values for all players from Transfermarkt. "
-        "Requests are spaced 15–45 seconds apart to avoid bot detection — expect roughly 30 seconds per player."
+
+    data_source = st.radio(
+        "Data source",
+        options=["kaggle", "transfermarkt"],
+        index=0,
+        horizontal=True,
+        help=(
+            "**Kaggle** — uses the weekly community dataset (dcaribou/transfermarkt-datasets). "
+            "Reliable, no bot detection. Values update once a week.\n\n"
+            "**Transfermarkt** — scrapes live. May return 403 on cloud-hosted IPs due to Cloudflare."
+        ),
     )
+    scraper.set_data_source(data_source)
+
+    if data_source == "kaggle":
+        st.caption("Using the Kaggle dataset. Values reflect the most recent weekly update.")
+    else:
+        st.caption(
+            "Scraping Transfermarkt directly. "
+            "Requests are spaced 15–45 seconds apart — expect roughly 30 seconds per player."
+        )
 
     all_players = db.get_all_players(conn)
 
