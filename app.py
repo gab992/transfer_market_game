@@ -1099,18 +1099,21 @@ def page_admin():
 
     data_source = st.radio(
         "Data source",
-        options=["kaggle", "transfermarkt"],
+        options=["ceapi", "kaggle", "transfermarkt"],
         index=0,
         horizontal=True,
         help=(
-            "**Kaggle** — uses the weekly community dataset (dcaribou/transfermarkt-datasets). "
-            "Reliable, no bot detection. Values update once a week.\n\n"
-            "**Transfermarkt** — scrapes live. May return 403 on cloud-hosted IPs due to Cloudflare."
+            "**ceapi** — fetches real-time values from Transfermarkt's internal JSON API. "
+            "No Cloudflare bot detection. Recommended.\n\n"
+            "**Kaggle** — uses the weekly community dataset. Reliable but values lag by days/weeks.\n\n"
+            "**Transfermarkt** — scrapes the HTML page directly. May return 403 on cloud IPs."
         ),
     )
     scraper.set_data_source(data_source)
 
-    if data_source == "kaggle":
+    if data_source == "ceapi":
+        st.caption("Using Transfermarkt's internal API. Values are real-time.")
+    elif data_source == "kaggle":
         st.caption("Using the Kaggle dataset. Values reflect the most recent weekly update.")
     else:
         st.caption(
