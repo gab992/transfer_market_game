@@ -120,14 +120,34 @@ def insert_player(conn, name: str, club: str, position: str,
     return row
 
 
-def update_player_value(conn, player_id: int, new_value: int) -> None:
-    """Update a player's current_value and set last_updated to now."""
+_SOURCE_COLS = {
+    "kaggle":        ("kaggle_value",        "kaggle_last_updated"),
+    "transfermarkt": ("transfermarkt_value", "transfermarkt_last_updated"),
+}
+
+
+def update_player_value(conn, player_id: int, new_value: int, source: str = "kaggle") -> None:
+    """
+    Update a player's current_value and the source-specific value column.
+
+    current_value is always updated (it's what the game uses for budgets).
+    The source column (kaggle_value or transfermarkt_value) is also updated so
+    both backends preserve their values independently — switching sources won't
+    overwrite the other source's last-known price.
+
+    Args:
+        source: "kaggle" or "transfermarkt".
+    """
+    val_col, ts_col = _SOURCE_COLS.get(source, _SOURCE_COLS["kaggle"])
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             UPDATE players
-            SET current_value = %s, last_updated = NOW()
+            SET current_value = %s,
+                last_updated = NOW(),
+                {val_col} = %s,
+                {ts_col} = NOW()
             WHERE id = %s
-        """, (new_value, player_id))
+        """, (new_value, new_value, player_id))
     conn.commit()
 
 
@@ -258,10 +278,9 @@ def buy_existing_player(conn, participant_id: int, player_id: int) -> dict:
     return get_participant(conn, participant_id)
 
 
-def buy_new_player(conn, participant_id: int, player_data: dict) -> dict:
+def buy_new_player(conn, participant_id: int, player_data: dict, source: str = "kaggle") -> dict:
     """
-    Add a brand-new player (scraped from Transfermarkt) to the database
-    and immediately purchase them for the given participant.
+    Add a brand-new player to the database and immediately purchase them.
 
     If the player URL already exists in the DB (e.g. scraped before but
     not yet owned), this falls back to buy_existing_player.
@@ -270,6 +289,9 @@ def buy_new_player(conn, participant_id: int, player_data: dict) -> dict:
         participant_id: The buyer's ID.
         player_data: Dict returned by scraper.scrape_player(), containing:
                      name, club, position, transfermrkt_url, current_value.
+        source: Data source used to fetch the player ("kaggle" or "transfermarkt").
+                Stored in the matching source column so it's preserved if the
+                active source is later switched.
 
     Returns:
         The updated participant row (with new budget).
@@ -278,6 +300,8 @@ def buy_new_player(conn, participant_id: int, player_data: dict) -> dict:
     existing = get_player_by_url(conn, player_data["transfermrkt_url"])
     if existing:
         return buy_existing_player(conn, participant_id, existing["id"])
+
+    val_col, ts_col = _SOURCE_COLS.get(source, _SOURCE_COLS["kaggle"])
 
     # Otherwise insert the new player first, then buy them — all in one transaction
     with conn.cursor() as cur:
@@ -304,16 +328,17 @@ def buy_new_player(conn, participant_id: int, player_data: dict) -> dict:
                 f"Insufficient budget. Need €{price:,}, have €{participant['budget']:,}."
             )
 
-        # Insert player
-        cur.execute("""
-            INSERT INTO players (name, club, position, transfermrkt_url, current_value)
-            VALUES (%s, %s, %s, %s, %s)
+        # Insert player, recording the source-specific value alongside current_value
+        cur.execute(f"""
+            INSERT INTO players (name, club, position, transfermrkt_url, current_value, {val_col}, {ts_col})
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
             RETURNING id
         """, (
             player_data["name"],
             player_data["club"],
             player_data["position"],
             player_data["transfermrkt_url"],
+            price,
             price,
         ))
         player_id = cur.fetchone()["id"]

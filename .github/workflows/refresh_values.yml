@@ -1,0 +1,28 @@
+name: Weekly Player Value Refresh
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Every Sunday at 2am UTC
+  workflow_dispatch:       # Also manually triggerable from the GitHub Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv and dependencies
+        run: pip install uv && uv sync
+
+      - name: Refresh player values from Kaggle dataset
+        run: uv run python scraper.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          DATA_SOURCE: kaggle
