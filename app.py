@@ -655,13 +655,16 @@ def page_offers():
 
     with col_left:
         st.markdown(f"**You give** (your team)")
-        my_player_options = {p["name"]: p["id"] for p in my_roster}
-        my_selected_names = st.multiselect(
+        my_player_options = {
+            f"{p['name']} ({fmt_euros(p['current_value'])})": p["id"]
+            for p in my_roster
+        }
+        my_selected_labels = st.multiselect(
             "Players you're offering",
             options=list(my_player_options.keys()),
             key="offer_my_players",
         )
-        my_selected_ids = [my_player_options[n] for n in my_selected_names]
+        my_selected_ids = [my_player_options[n] for n in my_selected_labels]
         sender_money = st.number_input(
             "Money you're giving (€)",
             min_value=0,
@@ -673,13 +676,16 @@ def page_offers():
 
     with col_right:
         st.markdown(f"**You receive** (from {target_name})")
-        their_player_options = {p["name"]: p["id"] for p in their_roster}
-        their_selected_names = st.multiselect(
+        their_player_options = {
+            f"{p['name']} ({fmt_euros(p['current_value'])})": p["id"]
+            for p in their_roster
+        }
+        their_selected_labels = st.multiselect(
             "Players you're requesting",
             options=list(their_player_options.keys()),
             key="offer_their_players",
         )
-        their_selected_ids = [their_player_options[n] for n in their_selected_names]
+        their_selected_ids = [their_player_options[n] for n in their_selected_labels]
         receiver_money = st.number_input(
             "Money you're requesting (€)",
             min_value=0,
