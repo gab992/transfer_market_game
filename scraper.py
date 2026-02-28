@@ -137,13 +137,12 @@ def _ensure_cache_fresh(force: bool = False) -> None:
 
 
 def _load_dataframes():
-    """Load the three CSVs we need from the cache and return (players_df, valuations_df, clubs_df)."""
+    """Load the two CSVs we need from the cache and return (players_df, clubs_df)."""
     import pandas as pd
 
     players_df = pd.read_csv(_CACHE_DIR / "players.csv")
-    valuations_df = pd.read_csv(_CACHE_DIR / "player_valuations.csv")
     clubs_df = pd.read_csv(_CACHE_DIR / "clubs.csv")
-    return players_df, valuations_df, clubs_df
+    return players_df, clubs_df
 
 
 def _lookup_player_kaggle(url: str) -> dict:
@@ -154,7 +153,7 @@ def _lookup_player_kaggle(url: str) -> dict:
     player_id = _get_player_id(url)
 
     _ensure_cache_fresh()
-    players_df, valuations_df, clubs_df = _load_dataframes()
+    players_df, clubs_df = _load_dataframes()
 
     player_rows = players_df[players_df["player_id"] == player_id]
     if player_rows.empty:
@@ -164,11 +163,11 @@ def _lookup_player_kaggle(url: str) -> dict:
         )
     player = player_rows.iloc[0]
 
-    # Most recent valuation
-    player_vals = valuations_df[valuations_df["player_id"] == player_id].sort_values("date", ascending=False)
-    if player_vals.empty:
+    # Current market value comes directly from the player profile row
+    raw_value = player.get("market_value_in_eur")
+    if not raw_value or pd.isna(raw_value):
         raise ValueError(f"No market value found in dataset for player ID {player_id}.")
-    current_value = int(player_vals.iloc[0]["market_value_in_eur"])
+    current_value = int(raw_value)
 
     # Club name via join
     club = "Unknown"
@@ -196,7 +195,7 @@ def _refresh_via_kaggle(conn, on_player_done=None) -> list[dict]:
     # Always pull a fresh copy during a bulk refresh
     _ensure_cache_fresh(force=True)
     import pandas as pd
-    valuations_df = pd.read_csv(_CACHE_DIR / "player_valuations.csv")
+    players_df = pd.read_csv(_CACHE_DIR / "players.csv")
 
     db_players = db.get_all_players(conn)
     results = []
@@ -206,13 +205,13 @@ def _refresh_via_kaggle(conn, on_player_done=None) -> list[dict]:
         result = {"name": player["name"], "old_value": player["current_value"]}
         try:
             player_id = _get_player_id(player["transfermrkt_url"])
-            player_vals = (
-                valuations_df[valuations_df["player_id"] == player_id]
-                .sort_values("date", ascending=False)
-            )
-            if player_vals.empty:
-                raise ValueError("No valuations found in dataset.")
-            new_value = int(player_vals.iloc[0]["market_value_in_eur"])
+            player_rows = players_df[players_df["player_id"] == player_id]
+            if player_rows.empty:
+                raise ValueError("Player not found in dataset.")
+            raw_value = player_rows.iloc[0].get("market_value_in_eur")
+            if not raw_value or pd.isna(raw_value):
+                raise ValueError("No market value found in dataset.")
+            new_value = int(raw_value)
             db.update_player_value(conn, player["id"], new_value, source="kaggle")
             result["new_value"] = new_value
             result["success"] = True
