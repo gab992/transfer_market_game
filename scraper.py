@@ -14,6 +14,7 @@ import time
 import random
 import db
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 
@@ -70,7 +71,7 @@ def scrape_player(url: str, session: requests.Session = None) -> dict:
     time.sleep(random.uniform(1, 3))
 
     if session is None:
-        session = requests.Session()
+        session = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "darwin", "desktop": True})
         session.headers.update(HEADERS)
     response = session.get(url, timeout=10)
     response.raise_for_status()
@@ -115,7 +116,7 @@ def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -
 
     # Reuse a single session across all requests so cookies are preserved,
     # which makes the traffic look more like a real browser session.
-    shared_session = requests.Session()
+    shared_session = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "darwin", "desktop": True})
     shared_session.headers.update(HEADERS)
 
     for i, player in enumerate(players):
