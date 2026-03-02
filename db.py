@@ -380,9 +380,10 @@ def sell_player(conn, participant_id: int, player_id: int) -> dict:
     """
     Sell a player from a participant's roster.
 
-    Adds the player's *current* market value (not what was paid) to the
-    participant's budget, then removes the roster row. The player record
-    stays in the `players` table and becomes available for others to buy.
+    Adds 95% of the player's *current* market value to the participant's
+    budget (a 5% market fee is deducted), then removes the roster row.
+    The player record stays in the `players` table and becomes available
+    for others to buy.
 
     Returns:
         The updated participant row (with new budget).
@@ -403,7 +404,8 @@ def sell_player(conn, participant_id: int, player_id: int) -> dict:
         if not row:
             raise ValueError("This player is not on your roster.")
 
-        sale_price = row["current_value"]
+        # Apply 5% market fee
+        sale_price = round(row["current_value"] * 0.95)
 
         # Add sale price to budget
         cur.execute(
