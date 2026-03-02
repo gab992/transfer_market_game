@@ -944,6 +944,45 @@ def page_admin():
 
     st.divider()
 
+    # ---- Section: Budget Adjustments ----
+    st.subheader("Budget Adjustments")
+    st.caption("Apply a one-time bonus or penalty to a participant's budget.")
+
+    if participants:
+        with st.form("budget_adjustment_form"):
+            participant_options = {p["name"]: p["id"] for p in participants}
+            selected_name = st.selectbox("Participant", options=list(participant_options.keys()))
+            amount = st.number_input(
+                "Amount (€) — positive to add, negative to deduct",
+                min_value=-500_000_000,
+                max_value=500_000_000,
+                value=0,
+                step=1_000_000,
+            )
+            reason = st.text_input("Reason (optional)", placeholder="e.g. Performance bonus, rule violation penalty")
+            if st.form_submit_button("Apply Adjustment"):
+                if amount == 0:
+                    st.error("Amount cannot be zero.")
+                else:
+                    try:
+                        updated = db.adjust_participant_budget(
+                            conn, participant_options[selected_name], int(amount)
+                        )
+                        action = "bonus" if amount > 0 else "penalty"
+                        detail = f" ({reason})" if reason.strip() else ""
+                        st.success(
+                            f"Applied {fmt_euros(abs(int(amount)))} {action} to "
+                            f"**{updated['name']}**{detail}. "
+                            f"New budget: {fmt_euros(updated['budget'])}."
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not apply adjustment: {e}")
+    else:
+        st.info("No participants yet.")
+
+    st.divider()
+
     # ---- Section: User Accounts ----
     st.subheader("User Accounts")
     st.caption("Create login accounts and link them to participants.")

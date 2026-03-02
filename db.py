@@ -48,6 +48,22 @@ def get_participant(conn, participant_id: int) -> dict | None:
         return cur.fetchone()
 
 
+def adjust_participant_budget(conn, participant_id: int, amount: int) -> dict:
+    """
+    Add (or subtract, if negative) amount from a participant's budget.
+    Returns the updated participant row.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE participants SET budget = budget + %s WHERE id = %s "
+            "RETURNING id, name, budget",
+            (amount, participant_id)
+        )
+        row = cur.fetchone()
+    conn.commit()
+    return row
+
+
 def create_participant(conn, name: str, starting_budget: int = 100_000_000) -> dict:
     """
     Insert a new participant and return the created row.
