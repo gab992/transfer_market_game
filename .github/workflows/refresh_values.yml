@@ -1,4 +1,4 @@
-name: Weekly Player Value Refresh
+name: Daily Player Value Refresh
 
 on:
   schedule:

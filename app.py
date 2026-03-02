@@ -285,16 +285,37 @@ def page_my_team():
                 unsafe_allow_html=True,
             )
         with col_btn:
-            if st.button("Sell", key=f"sell_{player['id']}"):
-                try:
-                    updated = db.sell_player(conn, participant_id, player["id"])
-                    st.success(
-                        f"Sold {player['name']} for {fmt_euros(player['current_value'])}. "
-                        f"New budget: {fmt_euros(updated['budget'])}"
-                    )
+            confirm_key = f"confirm_sell_{player['id']}"
+            if not st.session_state.get(confirm_key):
+                if st.button("Sell", key=f"sell_{player['id']}"):
+                    st.session_state[confirm_key] = True
                     st.rerun()
-                except ValueError as e:
-                    st.error(str(e))
+
+        if st.session_state.get(f"confirm_sell_{player['id']}"):
+            fee = round(player["current_value"] * 0.05)
+            net = player["current_value"] - fee
+            st.warning(
+                f"Selling to the market incurs a 5% fee ({fmt_euros(fee)}). "
+                f"You will receive **{fmt_euros(net)}** instead of the full {fmt_euros(player['current_value'])}. "
+                f"Direct offers between managers are not subject to this fee."
+            )
+            col_confirm, col_cancel = st.columns(2)
+            with col_confirm:
+                if st.button("Confirm Sale", key=f"confirm_btn_{player['id']}"):
+                    try:
+                        updated = db.sell_player(conn, participant_id, player["id"])
+                        st.session_state[f"confirm_sell_{player['id']}"] = False
+                        st.success(
+                            f"Sold {player['name']} for {fmt_euros(net)}. "
+                            f"New budget: {fmt_euros(updated['budget'])}"
+                        )
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+            with col_cancel:
+                if st.button("Cancel", key=f"cancel_sell_{player['id']}"):
+                    st.session_state[f"confirm_sell_{player['id']}"] = False
+                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
