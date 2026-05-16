@@ -146,7 +146,7 @@ def _lookup_player_kaggle(url: str) -> dict:
         position = "Unknown"
 
     return {
-        "name": player["name"],
+        "name": db.normalize_player_name(str(player["name"])),
         "club": club,
         "position": position,
         "current_value": current_value,
@@ -293,7 +293,7 @@ def _lookup_player_ceapi(url: str) -> dict:
                 position = "Unknown"
 
             return {
-                "name": player["name"],
+                "name": db.normalize_player_name(str(player["name"])),
                 "club": club,
                 "position": position,
                 "current_value": current_value,
@@ -458,12 +458,14 @@ def _parse_name(soup: BeautifulSoup) -> str:
         # The headline contains the name, sometimes with a span for shirt number
         for span in tag.find_all("span"):
             span.decompose()
-        return tag.get_text(strip=True)
+        # separator=" " ensures text nodes from adjacent elements get a space
+        # between them instead of being concatenated (e.g. "KylianMbappé").
+        return db.normalize_player_name(tag.get_text(separator=" ", strip=True))
 
     # Fallback: og:title meta tag (e.g. "Erling Haaland - Man City - Profile")
     og = soup.find("meta", property="og:title")
     if og and og.get("content"):
-        return og["content"].split(" - ")[0].strip()
+        return db.normalize_player_name(og["content"].split(" - ")[0].strip())
 
     raise ValueError("Could not parse player name from page.")
 
@@ -569,6 +571,20 @@ if __name__ == "__main__":
     print(f"Refreshing all player values via '{DATA_SOURCE}'...\n")
     results = refresh_all_player_values(conn, on_player_done=log_progress)
 
-    conn.close()
     successes = sum(1 for r in results if r["success"])
     print(f"\nDone. {successes}/{len(results)} updated successfully.")
+
+    print("\nRunning duplicate check...")
+    dup_result = db.run_duplicate_check(conn)
+    if dup_result["deleted"]:
+        print(f"  Deleted {len(dup_result['deleted'])} unowned duplicate(s):")
+        for p in dup_result["deleted"]:
+            print(f"    - {p['name']} (id={p['id']})")
+    if dup_result["flagged"]:
+        print(f"  Flagged {len(dup_result['flagged'])} duplicate(s) for manual resolution:")
+        for p in dup_result["flagged"]:
+            print(f"    - {p['name']} (id={p['id']})")
+    if not dup_result["deleted"] and not dup_result["flagged"]:
+        print("  No duplicates found.")
+
+    conn.close()

@@ -11,8 +11,29 @@ Connection management is left to the caller (app.py uses st.cache_resource
 to share a single connection across sessions).
 """
 
+import re
 import psycopg2
 import psycopg2.extras
+
+
+# ---------------------------------------------------------------------------
+# Name normalization (pure helper — no DB required)
+# ---------------------------------------------------------------------------
+
+def normalize_player_name(name: str) -> str:
+    """
+    Fix player names where first/last name were joined without a space.
+
+    Transfermarkt's HTML sometimes concatenates text nodes without a separator
+    (e.g. 'KylianMbappé' instead of 'Kylian Mbappé'). This inserts a space at
+    every lowercase→uppercase boundary, then collapses duplicate whitespace.
+    """
+    fixed = re.sub(
+        r'([a-záéíóúàèìòùâêîôûäëïöüçñýþœæ])([A-ZÁÉÍÓÚÀÈÌÒÙÂÊÎÔÛÄËÏÖÜÇÑ])',
+        r'\1 \2',
+        name,
+    )
+    return ' '.join(fixed.split())
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +111,8 @@ def get_all_players(conn) -> list[dict]:
     """Return every player in the database (owned or not)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, name, club, position, transfermrkt_url, current_value, last_updated "
+            "SELECT id, name, club, position, transfermrkt_url, current_value, "
+            "last_updated, is_duplicate_flagged "
             "FROM players ORDER BY name"
         )
         return cur.fetchall()
@@ -102,7 +124,8 @@ def get_available_players(conn) -> list[dict]:
     """
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT p.id, p.name, p.club, p.position, p.current_value, p.last_updated
+            SELECT p.id, p.name, p.club, p.position, p.current_value,
+                   p.last_updated, p.is_duplicate_flagged
             FROM players p
             LEFT JOIN rosters r ON r.player_id = p.id
             WHERE r.player_id IS NULL
@@ -219,6 +242,7 @@ def get_roster(conn, participant_id: int) -> list[dict]:
                 p.club,
                 p.position,
                 p.current_value,
+                p.is_duplicate_flagged,
                 r.purchased_at_value,
                 r.purchased_at
             FROM rosters r
@@ -1764,7 +1788,7 @@ def get_all_players_with_owner(conn) -> list[dict]:
     or NULL if available on the market.
 
     Columns: id, name, club, position, current_value, last_updated,
-             owner_id, owner_name
+             owner_id, owner_name, is_duplicate_flagged
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -1775,6 +1799,7 @@ def get_all_players_with_owner(conn) -> list[dict]:
                 p.position,
                 p.current_value,
                 p.last_updated,
+                p.is_duplicate_flagged,
                 r.participant_id AS owner_id,
                 pt.name          AS owner_name
             FROM players p
@@ -1783,3 +1808,207 @@ def get_all_players_with_owner(conn) -> list[dict]:
             ORDER BY p.name
         """)
         return cur.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection & name normalization
+# ---------------------------------------------------------------------------
+
+def normalize_all_player_names(conn) -> int:
+    """
+    Apply normalize_player_name() to every player currently in the database.
+    Returns the number of rows that were actually updated.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, name FROM players")
+        rows = cur.fetchall()
+        updated = 0
+        for row in rows:
+            fixed = normalize_player_name(row["name"])
+            if fixed != row["name"]:
+                cur.execute("UPDATE players SET name = %s WHERE id = %s", (fixed, row["id"]))
+                updated += 1
+    conn.commit()
+    return updated
+
+
+def get_potential_duplicates(conn, name: str, url: str) -> list[dict]:
+    """
+    Return players already in the DB that might be the same person as the
+    candidate being added.
+
+    Checks two signals:
+    1. Same Transfermarkt player ID extracted from the URL (definitive).
+    2. Same normalized name (case-insensitive, likely duplicate).
+
+    Returns a list of matching player dicts (id, name, club, owner_name).
+    """
+    import re as _re
+    # Extract numeric Transfermarkt player ID
+    tm_id_match = _re.search(r'/spieler/(\d+)', url)
+    tm_id = tm_id_match.group(1) if tm_id_match else None
+
+    normalized = normalize_player_name(name).lower()
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                p.id, p.name, p.club,
+                pt.name AS owner_name
+            FROM players p
+            LEFT JOIN rosters r  ON r.player_id = p.id
+            LEFT JOIN participants pt ON pt.id = r.participant_id
+            WHERE
+                (%(tm_id)s IS NOT NULL
+                 AND p.transfermrkt_url ~ ('/spieler/' || %(tm_id)s || '(/|$)'))
+                OR LOWER(p.name) = %(normalized)s
+        """, {"tm_id": tm_id, "normalized": normalized})
+        return cur.fetchall()
+
+
+def get_flagged_players_for_participant(conn, participant_id: int) -> list[dict]:
+    """Return all is_duplicate_flagged players on a given participant's roster."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT p.id, p.name, p.club
+            FROM rosters r
+            JOIN players p ON p.id = r.player_id
+            WHERE r.participant_id = %s
+              AND p.is_duplicate_flagged = TRUE
+            ORDER BY p.name
+        """, (participant_id,))
+        return cur.fetchall()
+
+
+def run_duplicate_check(conn) -> dict:
+    """
+    Scan the entire player database for duplicates, flag them, and auto-delete
+    fully unowned duplicates (keeping the entry with the lowest id).
+
+    Two players are considered duplicates when either:
+    - They share the same Transfermarkt player ID extracted from their URL.
+    - They share the same normalized name (case-insensitive).
+
+    Behaviour per group:
+    - All unowned  → keep lowest-id entry; delete the rest.
+    - One owned + extras unowned → delete unowned extras; do NOT flag the owned one
+      (it is now the only copy).
+    - Multiple owned (possibly with unowned extras) → delete any unowned extras;
+      flag every still-present player in the group bright red so users can resolve.
+
+    Returns a dict:
+        {
+          "flagged":  [{"id": …, "name": …}, …],
+          "deleted":  [{"id": …, "name": …}, …],
+          "groups":   [{"reason": …, "players": […]}, …],
+        }
+    """
+    import re as _re
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                p.id,
+                p.name,
+                p.transfermrkt_url,
+                substring(p.transfermrkt_url from '/spieler/(\\d+)') AS tm_id,
+                EXISTS(
+                    SELECT 1 FROM rosters WHERE player_id = p.id
+                ) AS is_owned
+            FROM players p
+            ORDER BY p.id
+        """)
+        all_players = cur.fetchall()
+
+    # ---- Build candidate duplicate groups ---------------------------------
+
+    # Group by Transfermarkt player ID
+    by_tm_id: dict[str, list] = {}
+    for p in all_players:
+        if p["tm_id"]:
+            by_tm_id.setdefault(p["tm_id"], []).append(p)
+
+    # Group by normalized name (case-insensitive)
+    by_name: dict[str, list] = {}
+    for p in all_players:
+        key = normalize_player_name(p["name"]).lower()
+        by_name.setdefault(key, []).append(p)
+
+    # Collect groups with more than one member, avoiding double-counting
+    seen_id_sets: list[frozenset] = []
+    groups: list[dict] = []
+
+    def _add_group(reason: str, members: list) -> None:
+        id_set = frozenset(p["id"] for p in members)
+        for existing in seen_id_sets:
+            if id_set & existing:
+                # Merge into existing group rather than creating a duplicate entry
+                return
+        seen_id_sets.append(id_set)
+        groups.append({"reason": reason, "players": list(members)})
+
+    for tm_id, members in by_tm_id.items():
+        if len(members) > 1:
+            _add_group(f"Same Transfermarkt player ID ({tm_id})", members)
+
+    for norm_name, members in by_name.items():
+        if len(members) > 1:
+            _add_group(f"Same normalized name ('{norm_name}')", members)
+
+    if not groups:
+        # Clear any stale flags from a previous run
+        with conn.cursor() as cur:
+            cur.execute("UPDATE players SET is_duplicate_flagged = FALSE")
+        conn.commit()
+        return {"flagged": [], "deleted": [], "groups": []}
+
+    # ---- Clear all existing flags (rebuild from scratch) ------------------
+    with conn.cursor() as cur:
+        cur.execute("UPDATE players SET is_duplicate_flagged = FALSE")
+
+    deleted: list[dict] = []
+    flagged: list[dict] = []
+    ids_deleted: set[int] = set()
+
+    with conn.cursor() as cur:
+        for group in groups:
+            members = group["players"]
+            owned   = [p for p in members if p["is_owned"]]
+            unowned = [p for p in members if not p["is_owned"]]
+
+            if not owned:
+                # All unowned: keep lowest-id, delete the rest
+                members_sorted = sorted(members, key=lambda p: p["id"])
+                for p in members_sorted[1:]:
+                    cur.execute("DELETE FROM players WHERE id = %s", (p["id"],))
+                    deleted.append({"id": p["id"], "name": p["name"]})
+                    ids_deleted.add(p["id"])
+
+            elif len(owned) == 1:
+                # Exactly one owned player: delete all unowned extras, no flags needed
+                for p in unowned:
+                    cur.execute("DELETE FROM players WHERE id = %s", (p["id"],))
+                    deleted.append({"id": p["id"], "name": p["name"]})
+                    ids_deleted.add(p["id"])
+
+            else:
+                # Multiple owned players: delete unowned extras, flag all owned
+                for p in unowned:
+                    cur.execute("DELETE FROM players WHERE id = %s", (p["id"],))
+                    deleted.append({"id": p["id"], "name": p["name"]})
+                    ids_deleted.add(p["id"])
+                for p in owned:
+                    cur.execute(
+                        "UPDATE players SET is_duplicate_flagged = TRUE WHERE id = %s",
+                        (p["id"],),
+                    )
+                    flagged.append({"id": p["id"], "name": p["name"]})
+
+    conn.commit()
+
+    # Remove deleted players from groups so callers can display clean data
+    for group in groups:
+        group["players"] = [p for p in group["players"] if p["id"] not in ids_deleted]
+    groups = [g for g in groups if len(g["players"]) > 1]
+
+    return {"flagged": flagged, "deleted": deleted, "groups": groups}
