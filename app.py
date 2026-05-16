@@ -34,6 +34,32 @@ for _kaggle_key in ("KAGGLE_USERNAME", "KAGGLE_KEY"):
 
 st.set_page_config(page_title="Transfer Market Game", page_icon="⚽", layout="wide")
 
+# ---------------------------------------------------------------------------
+# Temporary banner — remove or set SHOW_BANNER = False to hide
+# ---------------------------------------------------------------------------
+SHOW_BANNER = True
+BANNER_TEXT = "🎉🎓 Congrats Grad!! (Lila) 🤓💥🎊"
+BANNER_COLOR = "#ff69b4"  # hot pink — change this hex to recolor
+
+if SHOW_BANNER:
+    st.markdown(
+        f"""
+        <div style="
+            background-color: {BANNER_COLOR};
+            color: white;
+            text-align: center;
+            padding: 12px 20px;
+            font-size: 1.4rem;
+            font-weight: bold;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            letter-spacing: 0.03em;
+        ">
+            {BANNER_TEXT}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ---------------------------------------------------------------------------
 # Shared database connection (one connection for the whole app session)
