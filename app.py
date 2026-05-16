@@ -74,6 +74,18 @@ def get_conn():
 
 conn = get_conn()
 
+# Recover from a failed transaction if a previous script run left the
+# connection in an aborted state (psycopg2 raises InFailedSqlTransaction on
+# every subsequent query until rollback() is called).
+try:
+    with conn.cursor() as _hc:
+        _hc.execute("SELECT 1")
+except Exception:
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Auth gate — nothing below renders until the user is logged in
@@ -91,7 +103,11 @@ user = auth.current_user()
 # ---------------------------------------------------------------------------
 
 if user.get("participant_id"):
-    _dup_owned = db.get_flagged_players_for_participant(conn, user["participant_id"])
+    try:
+        _dup_owned = db.get_flagged_players_for_participant(conn, user["participant_id"])
+    except Exception:
+        conn.rollback()
+        _dup_owned = []
     if _dup_owned:
         _dup_names = ", ".join(p["name"] for p in _dup_owned)
         st.markdown(
@@ -1338,7 +1354,11 @@ def page_admin():
             st.rerun()
 
     # Show currently-flagged duplicates
-    _all_flagged = [p for p in db.get_all_players(conn) if p.get("is_duplicate_flagged")]
+    try:
+        _all_flagged = [p for p in db.get_all_players(conn) if p.get("is_duplicate_flagged")]
+    except Exception:
+        conn.rollback()
+        _all_flagged = []
     if _all_flagged:
         st.write(f"**Currently flagged as duplicates ({len(_all_flagged)}):**")
         for p in _all_flagged:
