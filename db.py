@@ -107,12 +107,23 @@ def create_participant(conn, name: str, starting_budget: int = 100_000_000) -> d
 # Players
 # ---------------------------------------------------------------------------
 
+def _has_dup_flag_column(conn) -> bool:
+    """Return True if the is_duplicate_flagged column exists (migration applied)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'players' AND column_name = 'is_duplicate_flagged'
+        """)
+        return cur.fetchone() is not None
+
+
 def get_all_players(conn) -> list[dict]:
     """Return every player in the database (owned or not)."""
+    dup_col = "is_duplicate_flagged" if _has_dup_flag_column(conn) else "FALSE AS is_duplicate_flagged"
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, name, club, position, transfermrkt_url, current_value, "
-            "last_updated, is_duplicate_flagged "
+            f"SELECT id, name, club, position, transfermrkt_url, current_value, "
+            f"last_updated, {dup_col} "
             "FROM players ORDER BY name"
         )
         return cur.fetchall()
@@ -122,10 +133,11 @@ def get_available_players(conn) -> list[dict]:
     """
     Return players who are not currently on any roster (available to buy).
     """
+    dup_col = "p.is_duplicate_flagged" if _has_dup_flag_column(conn) else "FALSE AS is_duplicate_flagged"
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT p.id, p.name, p.club, p.position, p.current_value,
-                   p.last_updated, p.is_duplicate_flagged
+                   p.last_updated, {dup_col}
             FROM players p
             LEFT JOIN rosters r ON r.player_id = p.id
             WHERE r.player_id IS NULL
@@ -234,15 +246,16 @@ def get_roster(conn, participant_id: int) -> list[dict]:
     Return the full roster for a participant, including each player's
     current value and what was paid for them.
     """
+    dup_col = "p.is_duplicate_flagged" if _has_dup_flag_column(conn) else "FALSE AS is_duplicate_flagged"
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 p.id,
                 p.name,
                 p.club,
                 p.position,
                 p.current_value,
-                p.is_duplicate_flagged,
+                {dup_col},
                 r.purchased_at_value,
                 r.purchased_at
             FROM rosters r
@@ -1790,8 +1803,9 @@ def get_all_players_with_owner(conn) -> list[dict]:
     Columns: id, name, club, position, current_value, last_updated,
              owner_id, owner_name, is_duplicate_flagged
     """
+    dup_col = "p.is_duplicate_flagged" if _has_dup_flag_column(conn) else "FALSE AS is_duplicate_flagged"
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 p.id,
                 p.name,
@@ -1799,7 +1813,7 @@ def get_all_players_with_owner(conn) -> list[dict]:
                 p.position,
                 p.current_value,
                 p.last_updated,
-                p.is_duplicate_flagged,
+                {dup_col},
                 r.participant_id AS owner_id,
                 pt.name          AS owner_name
             FROM players p
@@ -1868,6 +1882,8 @@ def get_potential_duplicates(conn, name: str, url: str) -> list[dict]:
 
 def get_flagged_players_for_participant(conn, participant_id: int) -> list[dict]:
     """Return all is_duplicate_flagged players on a given participant's roster."""
+    if not _has_dup_flag_column(conn):
+        return []
     with conn.cursor() as cur:
         cur.execute("""
             SELECT p.id, p.name, p.club
@@ -1884,6 +1900,9 @@ def run_duplicate_check(conn) -> dict:
     """
     Scan the entire player database for duplicates, flag them, and auto-delete
     fully unowned duplicates (keeping the entry with the lowest id).
+
+    Returns {"flagged": [], "deleted": [], "groups": []} if the migration has
+    not been applied yet (is_duplicate_flagged column is missing).
 
     Two players are considered duplicates when either:
     - They share the same Transfermarkt player ID extracted from their URL.
@@ -1903,6 +1922,9 @@ def run_duplicate_check(conn) -> dict:
           "groups":   [{"reason": …, "players": […]}, …],
         }
     """
+    if not _has_dup_flag_column(conn):
+        return {"flagged": [], "deleted": [], "groups": []}
+
     import re as _re
 
     with conn.cursor() as cur:
