@@ -132,6 +132,10 @@ def insert_player(conn, name: str, club: str, position: str,
             RETURNING id, name, club, position, transfermrkt_url, current_value
         """, (name, club, position, transfermrkt_url, current_value))
         row = cur.fetchone()
+        cur.execute("""
+            INSERT INTO player_events (player_id, event_type, new_value)
+            VALUES (%s, 'player_added', %s)
+        """, (row["id"], current_value))
     conn.commit()
     return row
 
@@ -146,10 +150,20 @@ _SOURCE_COLS = {
 def update_player_club_position(conn, player_id: int, club: str, position: str) -> None:
     """Update a player's club and position."""
     with conn.cursor() as cur:
+        cur.execute("SELECT club FROM players WHERE id = %s", (player_id,))
+        row = cur.fetchone()
+        old_club = row["club"] if row else None
+
         cur.execute(
             "UPDATE players SET club = %s, position = %s WHERE id = %s",
             (club, position, player_id)
         )
+
+        if old_club is not None and old_club != club:
+            cur.execute("""
+                INSERT INTO player_events (player_id, event_type, old_club, new_club)
+                VALUES (%s, 'club_changed', %s, %s)
+            """, (player_id, old_club, club))
     conn.commit()
 
 
@@ -167,6 +181,10 @@ def update_player_value(conn, player_id: int, new_value: int, source: str = "kag
     """
     val_col, ts_col = _SOURCE_COLS.get(source, _SOURCE_COLS["kaggle"])
     with conn.cursor() as cur:
+        cur.execute("SELECT current_value FROM players WHERE id = %s", (player_id,))
+        row = cur.fetchone()
+        old_value = row["current_value"] if row else None
+
         cur.execute(f"""
             UPDATE players
             SET current_value = %s,
@@ -175,6 +193,12 @@ def update_player_value(conn, player_id: int, new_value: int, source: str = "kag
                 {ts_col} = NOW()
             WHERE id = %s
         """, (new_value, new_value, player_id))
+
+        if old_value is not None and old_value != new_value:
+            cur.execute("""
+                INSERT INTO player_events (player_id, event_type, old_value, new_value)
+                VALUES (%s, 'price_change', %s, %s)
+            """, (player_id, old_value, new_value))
     conn.commit()
 
 
@@ -301,6 +325,12 @@ def buy_existing_player(conn, participant_id: int, player_id: int) -> dict:
             VALUES (%s, %s, %s, %s, %s, %s, 'buy', %s)
         """, (participant_id, participant["name"], player_id, player["name"], player["club"], player["position"], price))
 
+        # Log player event
+        cur.execute("""
+            INSERT INTO player_events (player_id, event_type, new_value, participant_id, participant_name)
+            VALUES (%s, 'player_bought', %s, %s, %s)
+        """, (player_id, price, participant_id, participant["name"]))
+
     conn.commit()
     return get_participant(conn, participant_id)
 
@@ -388,6 +418,16 @@ def buy_new_player(conn, participant_id: int, player_data: dict, source: str = "
             VALUES (%s, %s, %s, %s, %s, %s, 'buy', %s)
         """, (participant_id, participant["name"], player_id, player_data["name"], player_data["club"], player_data["position"], price))
 
+        # Log player events: added to game + bought
+        cur.execute("""
+            INSERT INTO player_events (player_id, event_type, new_value)
+            VALUES (%s, 'player_added', %s)
+        """, (player_id, price))
+        cur.execute("""
+            INSERT INTO player_events (player_id, event_type, new_value, participant_id, participant_name)
+            VALUES (%s, 'player_bought', %s, %s, %s)
+        """, (player_id, price, participant_id, participant["name"]))
+
     conn.commit()
     return get_participant(conn, participant_id)
 
@@ -440,6 +480,12 @@ def sell_player(conn, participant_id: int, player_id: int) -> dict:
             INSERT INTO transfers (participant_id, participant_name, player_id, player_name, player_club, player_position, transfer_type, value)
             VALUES (%s, %s, %s, %s, %s, %s, 'sell', %s)
         """, (participant_id, row["participant_name"], player_id, row["name"], row["club"], row["position"], sale_price))
+
+        # Log player event
+        cur.execute("""
+            INSERT INTO player_events (player_id, event_type, new_value, participant_id, participant_name)
+            VALUES (%s, 'player_sold', %s, %s, %s)
+        """, (player_id, sale_price, participant_id, row["participant_name"]))
 
     conn.commit()
     return get_participant(conn, participant_id)
@@ -943,6 +989,19 @@ def accept_trade_offer(conn, offer_id: int, receiver_participant_id: int) -> Non
             WHERE id = %s
         """, (offer_id,))
 
+        # Log trade events for each player that moved
+        for pid in sender_give_ids:
+            cur.execute("""
+                INSERT INTO player_events (player_id, event_type, new_value, participant_id, participant_name)
+                VALUES (%s, 'trade', %s, %s, %s)
+            """, (pid, sender_give_values[pid], receiver_id, receiver["name"]))
+
+        for pid in receiver_give_ids:
+            cur.execute("""
+                INSERT INTO player_events (player_id, event_type, new_value, participant_id, participant_name)
+                VALUES (%s, 'trade', %s, %s, %s)
+            """, (pid, receiver_give_values[pid], sender_id, sender["name"]))
+
     conn.commit()
 
 
@@ -1348,8 +1407,16 @@ def clear_all_players(conn) -> int:
         The number of players deleted.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS cnt FROM players")
-        count = cur.fetchone()["cnt"]
+        cur.execute("SELECT id FROM players")
+        player_ids = [row["id"] for row in cur.fetchall()]
+        count = len(player_ids)
+
+        # Log removal events before cascade delete wipes them
+        for pid in player_ids:
+            cur.execute("""
+                INSERT INTO player_events (player_id, event_type)
+                VALUES (%s, 'player_removed')
+            """, (pid,))
 
         cur.execute("DELETE FROM rosters")
         cur.execute("DELETE FROM players")
@@ -1645,3 +1712,74 @@ def _settle_draft(conn, cur, base_order: list,
         else:
             # Found a valid picker
             return round_num, pick_idx, False
+
+
+# ---------------------------------------------------------------------------
+# Player Events
+# ---------------------------------------------------------------------------
+
+def get_player_events(conn, player_id: int) -> list[dict]:
+    """Return all events for a single player, newest first."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, player_id, event_type, occurred_at,
+                   old_value, new_value, old_club, new_club,
+                   participant_id, participant_name
+            FROM player_events
+            WHERE player_id = %s
+            ORDER BY occurred_at DESC
+        """, (player_id,))
+        return cur.fetchall()
+
+
+def get_players_price_history(conn, player_ids: list[int]) -> list[dict]:
+    """
+    Return price-relevant events (player_added + price_change) for a set of
+    players, to power the price-history chart.
+
+    Each row: player_id, player_name, occurred_at, value
+    Ordered by player_id, occurred_at ASC so lines can be built in order.
+    """
+    if not player_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                pe.player_id,
+                p.name  AS player_name,
+                pe.occurred_at,
+                COALESCE(pe.new_value, pe.old_value) AS value
+            FROM player_events pe
+            JOIN players p ON p.id = pe.player_id
+            WHERE pe.player_id = ANY(%s)
+              AND pe.event_type IN ('player_added', 'price_change')
+            ORDER BY pe.player_id, pe.occurred_at ASC
+        """, (player_ids,))
+        return cur.fetchall()
+
+
+def get_all_players_with_owner(conn) -> list[dict]:
+    """
+    Return every player with their current owner (participant name) if owned,
+    or NULL if available on the market.
+
+    Columns: id, name, club, position, current_value, last_updated,
+             owner_id, owner_name
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                p.id,
+                p.name,
+                p.club,
+                p.position,
+                p.current_value,
+                p.last_updated,
+                r.participant_id AS owner_id,
+                pt.name          AS owner_name
+            FROM players p
+            LEFT JOIN rosters r  ON r.player_id = p.id
+            LEFT JOIN participants pt ON pt.id = r.participant_id
+            ORDER BY p.name
+        """)
+        return cur.fetchall()
