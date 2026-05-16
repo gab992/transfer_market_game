@@ -16,6 +16,7 @@ Six pages (Admin is only visible to admin users):
 import os
 import streamlit as st
 from dotenv import load_dotenv
+import plotly.graph_objects as go
 
 import db
 import auth
@@ -109,7 +110,7 @@ with st.sidebar:
         _pending_offer_count = db.count_pending_offers_received(conn, user["participant_id"])
     offers_label = f"Offers ({_pending_offer_count})" if _pending_offer_count else "Offers"
 
-    pages = ["Leaderboard", "My Team", "Market", offers_label, "Milestones", "Feed"]
+    pages = ["Leaderboard", "My Team", "Market", offers_label, "Milestones", "Feed", "Players"]
     if auth.is_admin():
         pages.append("Admin")
 
@@ -1333,6 +1334,196 @@ def page_admin():
 
 
 # ---------------------------------------------------------------------------
+# Page: Players — explore all players and track their events / price history
+# ---------------------------------------------------------------------------
+
+_EVENT_ICONS = {
+    "player_added":   "🟢",
+    "player_removed": "🗑️",
+    "player_bought":  "🛒",
+    "player_sold":    "💸",
+    "price_change":   "📈",
+    "club_changed":   "🔀",
+    "trade":          "🔄",
+}
+
+
+def _event_label(event: dict) -> str:
+    icon = _EVENT_ICONS.get(event["event_type"], "•")
+    ts = event["occurred_at"].strftime("%-d %b %Y %H:%M")
+    et = event["event_type"].replace("_", " ").title()
+
+    detail = ""
+    if event["event_type"] == "price_change":
+        old = fmt_euros(event["old_value"]) if event["old_value"] else "?"
+        new = fmt_euros(event["new_value"]) if event["new_value"] else "?"
+        delta = (event["new_value"] - event["old_value"]) if event["old_value"] and event["new_value"] else None
+        delta_str = f" ({'+' if delta >= 0 else ''}{fmt_euros(delta)})" if delta is not None else ""
+        detail = f" — {old} → {new}{delta_str}"
+    elif event["event_type"] in ("player_bought", "player_sold", "trade"):
+        who = event.get("participant_name") or ""
+        val = fmt_euros(event["new_value"]) if event["new_value"] else ""
+        detail_parts = []
+        if who:
+            detail_parts.append(who)
+        if val:
+            detail_parts.append(f"@ {val}")
+        if detail_parts:
+            detail = " — " + ", ".join(detail_parts)
+    elif event["event_type"] == "club_changed":
+        old_c = event.get("old_club") or "?"
+        new_c = event.get("new_club") or "?"
+        detail = f" — {old_c} → {new_c}"
+    elif event["event_type"] == "player_added":
+        val = fmt_euros(event["new_value"]) if event["new_value"] else ""
+        if val:
+            detail = f" — entered at {val}"
+
+    return f"{icon} **{et}**{detail}  \n<span style='color:gray;font-size:0.82em'>{ts}</span>"
+
+
+def page_player_dashboard():
+    st.header("Players")
+    st.caption("Explore all players in the game, track their history, and compare price movements.")
+
+    all_players = db.get_all_players_with_owner(conn)
+
+    if not all_players:
+        st.info("No players in the game yet. Players appear here once added via the Market.")
+        return
+
+    # ------------------------------------------------------------------ #
+    # Filters
+    # ------------------------------------------------------------------ #
+    clubs     = sorted({p["club"] for p in all_players if p["club"] and p["club"] != "Unknown"})
+    positions = sorted({p["position"] for p in all_players if p["position"] and p["position"] != "Unknown"})
+
+    col_search, col_club, col_pos, col_status = st.columns([3, 2, 2, 2])
+    with col_search:
+        search = st.text_input("Search by name", placeholder="e.g. Salah", label_visibility="collapsed")
+    with col_club:
+        club_filter = st.selectbox("Club", ["All clubs"] + clubs, label_visibility="collapsed")
+    with col_pos:
+        pos_filter = st.selectbox("Position", ["All positions"] + positions, label_visibility="collapsed")
+    with col_status:
+        status_filter = st.selectbox("Status", ["All", "Available", "Owned"], label_visibility="collapsed")
+
+    filtered = all_players
+    if search:
+        filtered = [p for p in filtered if search.lower() in p["name"].lower()]
+    if club_filter != "All clubs":
+        filtered = [p for p in filtered if p["club"] == club_filter]
+    if pos_filter != "All positions":
+        filtered = [p for p in filtered if p["position"] == pos_filter]
+    if status_filter == "Available":
+        filtered = [p for p in filtered if not p["owner_name"]]
+    elif status_filter == "Owned":
+        filtered = [p for p in filtered if p["owner_name"]]
+
+    st.caption(f"Showing {len(filtered)} of {len(all_players)} players")
+
+    st.divider()
+
+    # ------------------------------------------------------------------ #
+    # Price history chart
+    # ------------------------------------------------------------------ #
+    st.subheader("Price History")
+    st.caption("Select players to include in the chart. Only players with recorded price events appear.")
+
+    player_name_to_id = {p["name"]: p["id"] for p in filtered}
+    selected_names = st.multiselect(
+        "Players on chart",
+        options=list(player_name_to_id.keys()),
+        default=[],
+        placeholder="Pick one or more players…",
+        label_visibility="collapsed",
+    )
+
+    if selected_names:
+        selected_ids = [player_name_to_id[n] for n in selected_names]
+        history_rows = db.get_players_price_history(conn, selected_ids)
+
+        if history_rows:
+            # Group by player
+            traces: dict[str, tuple[list, list]] = {}
+            for row in history_rows:
+                name = row["player_name"]
+                if name not in traces:
+                    traces[name] = ([], [])
+                traces[name][0].append(row["occurred_at"])
+                traces[name][1].append(row["value"])
+
+            fig = go.Figure()
+            for name, (times, values) in traces.items():
+                # Extend the last known value to "now" so lines reach the right edge
+                import datetime
+                times_ext  = list(times)  + [datetime.datetime.now(tz=times[-1].tzinfo)]
+                values_ext = list(values) + [values[-1]]
+                fig.add_trace(go.Scatter(
+                    x=times_ext, y=values_ext,
+                    mode="lines+markers",
+                    name=name,
+                    hovertemplate="%{x|%-d %b %Y}<br>%{customdata}<extra>" + name + "</extra>",
+                    customdata=[fmt_euros(v) for v in values_ext],
+                    line=dict(width=2),
+                    marker=dict(size=6),
+                ))
+
+            fig.update_layout(
+                yaxis_tickformat=",",
+                yaxis_title="Value (€)",
+                xaxis_title=None,
+                legend_title="Player",
+                hovermode="x unified",
+                margin=dict(l=0, r=0, t=10, b=0),
+                height=380,
+            )
+            fig.update_yaxes(tickprefix="€")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No price change events recorded for the selected players yet. Events accumulate after the next value refresh.")
+    else:
+        st.info("Select players above to see their price history.")
+
+    st.divider()
+
+    # ------------------------------------------------------------------ #
+    # Player list with event timelines
+    # ------------------------------------------------------------------ #
+    st.subheader("Player List")
+
+    for player in filtered:
+        subtitle = player_subtitle(player)
+        status_badge = f"**{player['owner_name']}**" if player["owner_name"] else "*Available*"
+        label = (
+            f"{'🟢' if not player['owner_name'] else '🔵'} "
+            f"**{player['name']}**"
+            + (f" — {subtitle}" if subtitle else "")
+            + f"  ·  {fmt_euros(player['current_value'])}  ·  {status_badge}"
+        )
+
+        with st.expander(label):
+            events = db.get_player_events(conn, player["id"])
+
+            col_meta, col_events = st.columns([1, 2])
+            with col_meta:
+                st.markdown(f"**Club:** {player['club'] or '—'}")
+                st.markdown(f"**Position:** {player['position'] or '—'}")
+                st.markdown(f"**Current value:** {fmt_euros(player['current_value'])}")
+                st.markdown(f"**Owner:** {player['owner_name'] or 'Available'}")
+                if player["last_updated"]:
+                    st.markdown(f"**Last updated:** {player['last_updated'].strftime('%-d %b %Y %H:%M')}")
+
+            with col_events:
+                st.markdown("**Event History**")
+                if events:
+                    for ev in events:
+                        st.markdown(_event_label(ev), unsafe_allow_html=True)
+                else:
+                    st.caption("No events recorded yet.")
+
+
+# ---------------------------------------------------------------------------
 # Render the selected page
 # ---------------------------------------------------------------------------
 
@@ -1348,5 +1539,7 @@ elif page == "Milestones":
     page_milestones()
 elif page == "Feed":
     page_feed()
+elif page == "Players":
+    page_player_dashboard()
 elif page == "Admin":
     page_admin()
