@@ -86,7 +86,7 @@ conn = get_conn()
 # Auth gate — nothing below renders until the user is logged in
 # ---------------------------------------------------------------------------
 
-st.title("Footy Ball Money Man Fantasy Game")
+st.title("Fantasy Clearlake Capital")
 auth.require_login(conn)
 
 # From here on, auth.current_user() is guaranteed to be set.
