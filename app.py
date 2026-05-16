@@ -87,6 +87,39 @@ user = auth.current_user()
 
 
 # ---------------------------------------------------------------------------
+# Duplicate-player notification — shown on every page if user owns flagged players
+# ---------------------------------------------------------------------------
+
+if user.get("participant_id"):
+    _dup_owned = db.get_flagged_players_for_participant(conn, user["participant_id"])
+    if _dup_owned:
+        _dup_names = ", ".join(p["name"] for p in _dup_owned)
+        st.markdown(
+            f"""
+            <div style="
+                background-color: #b71c1c;
+                color: #ffffff;
+                padding: 16px 20px;
+                border-radius: 8px;
+                margin-bottom: 12px;
+                font-size: 1.05rem;
+                font-weight: bold;
+                border: 3px solid #ff1744;
+            ">
+                ⚠️ DUPLICATE PLAYER ALERT<br>
+                <span style="font-weight:normal;">
+                Your roster contains player(s) flagged as duplicates:
+                <strong>{_dup_names}</strong>.<br>
+                Please coordinate with the other manager(s) who own the same player
+                to decide who keeps them. Contact the admin to resolve.
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Sidebar — navigation + user info
 # ---------------------------------------------------------------------------
 
@@ -144,6 +177,18 @@ def colored_delta(value: int) -> str:
     """Return an HTML span with green/red/grey coloring for a euro delta."""
     color = "#2ea043" if value > 0 else "#f85149" if value < 0 else "#888888"
     return f'<span style="color:{color}">{fmt_delta(value)}</span>'
+
+
+def dup_name(player: dict) -> str:
+    """
+    Return a bold player name for use in st.markdown(unsafe_allow_html=True).
+    If the player is flagged as a duplicate, the name is rendered in bright red
+    with a warning prefix so it stands out everywhere it appears.
+    """
+    n = player["name"]
+    if player.get("is_duplicate_flagged"):
+        return f'<span style="color:#e53935;font-weight:bold;">🔴 {n} (DUPLICATE)</span>'
+    return f"**{n}**"
 
 
 def player_subtitle(player: dict) -> str:
@@ -216,7 +261,7 @@ def page_leaderboard():
 
                     _sub = player_subtitle(player)
                     st.markdown(
-                        f"**{player['name']}**{(' — ' + _sub) if _sub else ''}  \n"
+                        f"{dup_name(player)}{(' — ' + _sub) if _sub else ''}  \n"
                         f"Value: **{fmt_euros(player['current_value'])}**{purchase_str}"
                         f"{milestone_html} · Paid: {fmt_euros(player['purchased_at_value'])}",
                         unsafe_allow_html=True,
@@ -297,7 +342,7 @@ def page_my_team():
 
             _sub = player_subtitle(player)
             st.markdown(
-                f"**{player['name']}**{(' — ' + _sub) if _sub else ''}  \n"
+                f"{dup_name(player)}{(' — ' + _sub) if _sub else ''}  \n"
                 f"Current value: **{fmt_euros(player['current_value'])}**{purchase_str}"
                 f"{milestone_html}  \n"
                 f"Purchased at: {fmt_euros(player['purchased_at_value'])}",
@@ -415,8 +460,9 @@ def page_market():
             with col_info:
                 _sub = player_subtitle(player)
                 st.markdown(
-                    f"**{player['name']}**{(' — ' + _sub) if _sub else ''}  \n"
-                    f"Value: **{fmt_euros(player['current_value'])}**"
+                    f"{dup_name(player)}{(' — ' + _sub) if _sub else ''}  \n"
+                    f"Value: **{fmt_euros(player['current_value'])}**",
+                    unsafe_allow_html=True,
                 )
             with col_btn:
                 affordable = player["current_value"] <= participant["budget"]
@@ -462,9 +508,13 @@ def page_market():
                 try:
                     data = scraper.scrape_player(url_input)
                     st.session_state["pending_player"] = data
+                    # Pre-add duplicate check
+                    dupes = db.get_potential_duplicates(conn, data["name"], data["transfermrkt_url"])
+                    st.session_state["pending_player_dupes"] = dupes
                 except Exception as e:
                     st.error(f"Could not fetch player: {e}")
                     st.session_state.pop("pending_player", None)
+                    st.session_state.pop("pending_player_dupes", None)
 
     # Confirmation step — shown after a successful lookup
     if "pending_player" in st.session_state:
@@ -473,6 +523,20 @@ def page_market():
             f"**{data['name']}** — {data['club']} · {data['position']}  \n"
             f"Current value: **{fmt_euros(data['current_value'])}**"
         )
+
+        # Warn if a likely-duplicate already exists in the DB
+        _pre_dupes = st.session_state.get("pending_player_dupes", [])
+        if _pre_dupes:
+            _pre_dupe_lines = "\n".join(
+                f"- **{p['name']}** ({p['club'] or '—'})"
+                + (f" — owned by **{p['owner_name']}**" if p["owner_name"] else " — *unowned*")
+                for p in _pre_dupes
+            )
+            st.warning(
+                f"⚠️ **Possible duplicate detected.** The following player(s) already in "
+                f"the database may be the same person:\n{_pre_dupe_lines}\n\n"
+                f"Confirm only if you are sure this is a different player."
+            )
 
         affordable = data["current_value"] <= participant["budget"]
         if not affordable:
@@ -498,12 +562,14 @@ def page_market():
                             f"New budget: {fmt_euros(updated['budget'])}"
                         )
                         st.session_state.pop("pending_player", None)
+                        st.session_state.pop("pending_player_dupes", None)
                         st.rerun()
                     except ValueError as e:
                         st.error(str(e))
         with col_cancel:
             if st.button("Cancel"):
                 st.session_state.pop("pending_player", None)
+                st.session_state.pop("pending_player_dupes", None)
                 st.rerun()
 
 
@@ -1214,6 +1280,74 @@ def page_admin():
             else:
                 st.success(f"All {successes} player(s) updated successfully.")
 
+            # Automatically run duplicate check after every full refresh
+            _post_refresh_dupes = db.run_duplicate_check(conn)
+            if _post_refresh_dupes["flagged"] or _post_refresh_dupes["deleted"]:
+                msgs = []
+                if _post_refresh_dupes["deleted"]:
+                    msgs.append(f"Auto-deleted {len(_post_refresh_dupes['deleted'])} unowned duplicate(s).")
+                if _post_refresh_dupes["flagged"]:
+                    msgs.append(f"Flagged {len(_post_refresh_dupes['flagged'])} duplicate(s) for manual resolution.")
+                st.warning("Duplicate check: " + " ".join(msgs))
+            else:
+                st.info("Duplicate check: no duplicates found.")
+
+    st.divider()
+
+    # ---- Section: Duplicate Check ----
+    st.subheader("Duplicate Check")
+    st.caption(
+        "Scan the player database for entries that appear to be the same player. "
+        "Unowned duplicates are deleted automatically; owned duplicates are flagged red "
+        "everywhere they appear and the affected managers are notified."
+    )
+
+    col_fix_names, col_run_dupes = st.columns(2)
+
+    with col_fix_names:
+        if st.button("Fix Player Names", help="Normalize all player names (inserts missing spaces between first/last name)."):
+            _fixed_count = db.normalize_all_player_names(conn)
+            if _fixed_count:
+                st.success(f"Fixed {_fixed_count} player name(s).")
+            else:
+                st.info("All player names already look correct.")
+
+    with col_run_dupes:
+        if st.button("Run Duplicate Check", type="primary"):
+            _dup = db.run_duplicate_check(conn)
+            if not _dup["flagged"] and not _dup["deleted"] and not _dup["groups"]:
+                st.success("No duplicates found.")
+            else:
+                if _dup["deleted"]:
+                    st.info(
+                        f"Deleted {len(_dup['deleted'])} unowned duplicate(s): "
+                        + ", ".join(p["name"] for p in _dup["deleted"])
+                    )
+                if _dup["flagged"]:
+                    st.warning(
+                        f"Flagged {len(_dup['flagged'])} duplicate(s) for manual resolution: "
+                        + ", ".join(p["name"] for p in _dup["flagged"])
+                    )
+                if _dup["groups"]:
+                    st.write("**Duplicate groups:**")
+                    for g in _dup["groups"]:
+                        names = ", ".join(
+                            f"{p['name']} (id={p['id']})" for p in g["players"]
+                        )
+                        st.write(f"- {g['reason']}: {names}")
+            st.rerun()
+
+    # Show currently-flagged duplicates
+    _all_flagged = [p for p in db.get_all_players(conn) if p.get("is_duplicate_flagged")]
+    if _all_flagged:
+        st.write(f"**Currently flagged as duplicates ({len(_all_flagged)}):**")
+        for p in _all_flagged:
+            st.markdown(
+                f'<span style="color:#e53935;font-weight:bold;">🔴 {p["name"]}</span>'
+                f" — {p['club'] or '—'} · id={p['id']}",
+                unsafe_allow_html=True,
+            )
+
     st.divider()
 
     # ---- Section: Player Database ----
@@ -1495,9 +1629,10 @@ def page_player_dashboard():
     for player in filtered:
         subtitle = player_subtitle(player)
         status_badge = f"**{player['owner_name']}**" if player["owner_name"] else "*Available*"
+        dup_marker = " 🔴 DUPLICATE" if player.get("is_duplicate_flagged") else ""
         label = (
             f"{'🟢' if not player['owner_name'] else '🔵'} "
-            f"**{player['name']}**"
+            f"{player['name']}{dup_marker}"
             + (f" — {subtitle}" if subtitle else "")
             + f"  ·  {fmt_euros(player['current_value'])}  ·  {status_badge}"
         )
