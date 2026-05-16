@@ -1,18 +1,9 @@
 """
-scraper.py — Fetches player data from Transfermarkt or the Kaggle dataset.
+scraper.py — Fetches player data from Transfermarkt's internal ceapi JSON endpoint.
 
 Two public functions:
   - scrape_player(url)           : fetch a single player's details by URL
   - refresh_all_player_values()  : update current_value for all players in the DB
-
-DATA_SOURCE controls which backend is used:
-  - "kaggle"        : uses the dcaribou/transfermarkt-datasets Kaggle dataset (default).
-                      Reliable, no bot detection issues. Dataset updates weekly.
-  - "transfermarkt" : scrapes Transfermarkt directly. May return 403 on cloud IPs
-                      due to Cloudflare bot detection. Works best from a local machine.
-
-The active source can be changed at runtime via set_data_source(), or set via the
-DATA_SOURCE environment variable before startup.
 """
 
 import os
@@ -26,37 +17,20 @@ import requests
 from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------------
-# Data source selection
-# ---------------------------------------------------------------------------
-
-DATA_SOURCE = os.environ.get("DATA_SOURCE", "ceapi")  # "ceapi" | "kaggle" | "transfermarkt"
-
-
-def set_data_source(source: str) -> None:
-    """Switch the active data acquisition backend at runtime."""
-    global DATA_SOURCE
-    if source not in ("ceapi", "kaggle", "transfermarkt"):
-        raise ValueError(f"Unknown data source: {source!r}. Must be 'ceapi', 'kaggle', or 'transfermarkt'.")
-    DATA_SOURCE = source
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+DATA_SOURCE = "ceapi"
+
 
 def scrape_player(url: str, session: requests.Session = None) -> dict:
     """
     Fetch a player's name, club, position, and current market value from
     a Transfermarkt profile URL.
 
-    Uses DATA_SOURCE to decide whether to query the Kaggle dataset or
-    scrape Transfermarkt directly.
-
     Args:
         url: A Transfermarkt player profile URL, e.g.:
              https://www.transfermarkt.com/erling-haaland/profil/spieler/418560
-        session: Only used when DATA_SOURCE == "transfermarkt". Optional
-            requests.Session to reuse across calls.
 
     Returns:
         A dict with keys: name, club, position, current_value, transfermrkt_url
@@ -64,28 +38,16 @@ def scrape_player(url: str, session: requests.Session = None) -> dict:
 
     Raises:
         ValueError: if the player can't be found or the page can't be parsed.
-        requests.HTTPError: if a live scrape fails (transfermarkt source only).
     """
-    if DATA_SOURCE == "ceapi":
-        return _lookup_player_ceapi(url)
-    if DATA_SOURCE == "kaggle":
-        return _lookup_player_kaggle(url)
-    return _scrape_player_transfermarkt(url, session=session)
+    return _lookup_player_ceapi(url)
 
 
-def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -> list[dict]:
+def refresh_all_player_values(conn, on_player_done=None) -> list[dict]:
     """
     Update the current market value for every player in the database.
 
-    Uses DATA_SOURCE to decide which backend to use:
-      - "ceapi"        : fetches real-time values from Transfermarkt's internal API.
-      - "kaggle"       : uses the weekly Kaggle dataset.
-      - "transfermarkt": scrapes the HTML page directly.
-
     Args:
         conn: An open psycopg2 database connection.
-        delay_range: Only used when DATA_SOURCE == "transfermarkt". A (min, max)
-            tuple of seconds to wait between requests. Defaults to (15, 45).
         on_player_done: Optional callback called after each player with
             (index: int, total: int, result: dict). Useful for progress UIs.
 
@@ -93,11 +55,7 @@ def refresh_all_player_values(conn, delay_range=(15, 45), on_player_done=None) -
         A list of dicts summarising the result for each player:
         {"name": ..., "old_value": ..., "new_value": ..., "success": bool, "error": ...}
     """
-    if DATA_SOURCE == "ceapi":
-        return _refresh_via_ceapi(conn, on_player_done=on_player_done)
-    if DATA_SOURCE == "kaggle":
-        return _refresh_via_kaggle(conn, on_player_done=on_player_done)
-    return _refresh_via_transfermarkt(conn, delay_range=delay_range, on_player_done=on_player_done)
+    return _refresh_via_ceapi(conn, on_player_done=on_player_done)
 
 
 # ---------------------------------------------------------------------------
