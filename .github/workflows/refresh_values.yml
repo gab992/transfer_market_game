@@ -2,7 +2,7 @@ name: Daily Player Value Refresh
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Every day at 2am UTC
+    - cron: '0 10 * * *'  # Every day at 6am ET (UTC-4)
   workflow_dispatch:       # Also manually triggerable from the GitHub Actions tab
 
 jobs:

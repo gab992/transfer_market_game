@@ -23,14 +23,6 @@ import scraper
 
 load_dotenv()
 
-# Expose Kaggle credentials from st.secrets as env vars so the kaggle library
-# can authenticate. st.secrets doesn't set os.environ automatically.
-for _kaggle_key in ("KAGGLE_USERNAME", "KAGGLE_KEY"):
-    if _kaggle_key not in os.environ:
-        try:
-            os.environ[_kaggle_key] = st.secrets[_kaggle_key]
-        except Exception:
-            pass  # Not set in secrets — will fall back to ~/.kaggle/kaggle.json or fail at auth time
 
 st.set_page_config(page_title="Transfer Market Game", page_icon="⚽", layout="wide")
 
@@ -1183,29 +1175,7 @@ def page_admin():
     # ---- Section: Market Values ----
     st.subheader("Market Values")
 
-    data_source = st.radio(
-        "Data source",
-        options=["ceapi", "kaggle", "transfermarkt"],
-        index=0,
-        horizontal=True,
-        help=(
-            "**ceapi** — fetches real-time values from Transfermarkt's internal JSON API. "
-            "No Cloudflare bot detection. Recommended.\n\n"
-            "**Kaggle** — uses the weekly community dataset. Reliable but values lag by days/weeks.\n\n"
-            "**Transfermarkt** — scrapes the HTML page directly. May return 403 on cloud IPs."
-        ),
-    )
-    scraper.set_data_source(data_source)
-
-    if data_source == "ceapi":
-        st.caption("Using Transfermarkt's internal API. Values are real-time.")
-    elif data_source == "kaggle":
-        st.caption("Using the Kaggle dataset. Values reflect the most recent weekly update.")
-    else:
-        st.caption(
-            "Scraping Transfermarkt directly. "
-            "Requests are spaced 15–45 seconds apart — expect roughly 30 seconds per player."
-        )
+    st.caption("Using Transfermarkt's internal API. Values are real-time.")
 
     all_players = db.get_all_players(conn)
 
