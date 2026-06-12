@@ -14,6 +14,7 @@ Six pages (Admin is only visible to admin users):
 """
 
 import os
+import html
 import streamlit as st
 from dotenv import load_dotenv
 import plotly.graph_objects as go
@@ -21,6 +22,18 @@ import plotly.graph_objects as go
 import db
 import auth
 import scraper
+
+
+def _h(value) -> str:
+    """HTML-escape a value before interpolating it into st.markdown(unsafe_allow_html=True).
+
+    Player names, clubs and positions come from a third-party source
+    (Transfermarkt), and participant names / usernames are free-text. Any of
+    these can contain characters that would otherwise be interpreted as raw
+    HTML when rendered in an unsafe_allow_html block. Escaping here neutralises
+    stored-XSS via that data; ordinary names render unchanged.
+    """
+    return html.escape("" if value is None else str(value))
 
 load_dotenv()
 
@@ -109,7 +122,7 @@ if user.get("participant_id"):
         conn.rollback()
         _dup_owned = []
     if _dup_owned:
-        _dup_names = ", ".join(p["name"] for p in _dup_owned)
+        _dup_names = ", ".join(_h(p["name"]) for p in _dup_owned)
         st.markdown(
             f"""
             <div style="
@@ -201,7 +214,7 @@ def dup_name(player: dict) -> str:
     If the player is flagged as a duplicate, the name is rendered in bright red
     with a warning prefix so it stands out everywhere it appears.
     """
-    n = player["name"]
+    n = _h(player["name"])
     if player.get("is_duplicate_flagged"):
         return f'<span style="color:#e53935;font-weight:bold;">🔴 {n} (DUPLICATE)</span>'
     return f"**{n}**"
@@ -216,7 +229,7 @@ def player_subtitle(player: dict) -> str:
     position = player.get("position") or ""
     if club == "Unknown":     club = ""
     if position == "Unknown": position = ""
-    parts = [p for p in (club, position) if p]
+    parts = [_h(p) for p in (club, position) if p]
     return " · ".join(parts)
 
 
@@ -674,7 +687,7 @@ def _fmt_offer_side(players: list[dict], money: int) -> str:
             "position": p.get("player_position"),
         }
         sub = player_subtitle(subtitle_dict)
-        parts.append(f"**{p['player_name']}**" + (f" ({sub})" if sub else ""))
+        parts.append(f"**{_h(p['player_name'])}**" + (f" ({sub})" if sub else ""))
     if money:
         parts.append(fmt_euros(money))
     return ", ".join(parts) if parts else "nothing"
@@ -892,18 +905,18 @@ def page_feed():
                     action_icon = "🟢" if is_buy else "🔴"
                     action_word = "bought" if is_buy else "sold"
                     value_str = fmt_euros(e["value"])
-                    subtitle = f"{e['player_club']} · {e['player_position']}"
+                    subtitle = f"{_h(e['player_club'])} · {_h(e['player_position'])}"
                     st.markdown(
-                        f"{action_icon} **{e['participant_name']}** {action_word} "
-                        f"**{e['player_name']}** <span style='color:gray;font-size:0.85em'>({subtitle})</span> "
+                        f"{action_icon} **{_h(e['participant_name'])}** {action_word} "
+                        f"**{_h(e['player_name'])}** <span style='color:gray;font-size:0.85em'>({subtitle})</span> "
                         f"for **{value_str}**",
                         unsafe_allow_html=True,
                     )
 
                 else:  # trade_offer
                     status = e["status"]
-                    sender   = e["sender_name"]
-                    receiver = e["receiver_name"]
+                    sender   = _h(e["sender_name"])
+                    receiver = _h(e["receiver_name"])
                     sg_str = _fmt_offer_side(e.get("sender_gives", []),   e["sender_money"])
                     rg_str = _fmt_offer_side(e.get("receiver_gives", []), e["receiver_money"])
 
@@ -1363,8 +1376,8 @@ def page_admin():
         st.write(f"**Currently flagged as duplicates ({len(_all_flagged)}):**")
         for p in _all_flagged:
             st.markdown(
-                f'<span style="color:#e53935;font-weight:bold;">🔴 {p["name"]}</span>'
-                f" — {p['club'] or '—'} · id={p['id']}",
+                f'<span style="color:#e53935;font-weight:bold;">🔴 {_h(p["name"])}</span>'
+                f" — {_h(p['club'] or '—')} · id={p['id']}",
                 unsafe_allow_html=True,
             )
 
@@ -1515,7 +1528,7 @@ def _event_label(event: dict) -> str:
         delta_str = f" ({'+' if delta >= 0 else ''}{fmt_euros(delta)})" if delta is not None else ""
         detail = f" — {old} → {new}{delta_str}"
     elif event["event_type"] in ("player_bought", "player_sold", "trade"):
-        who = event.get("participant_name") or ""
+        who = _h(event.get("participant_name") or "")
         val = fmt_euros(event["new_value"]) if event["new_value"] else ""
         detail_parts = []
         if who:
@@ -1525,8 +1538,8 @@ def _event_label(event: dict) -> str:
         if detail_parts:
             detail = " — " + ", ".join(detail_parts)
     elif event["event_type"] == "club_changed":
-        old_c = event.get("old_club") or "?"
-        new_c = event.get("new_club") or "?"
+        old_c = _h(event.get("old_club") or "?")
+        new_c = _h(event.get("new_club") or "?")
         detail = f" — {old_c} → {new_c}"
     elif event["event_type"] == "player_added":
         val = fmt_euros(event["new_value"]) if event["new_value"] else ""
