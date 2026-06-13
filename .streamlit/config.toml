@@ -1,0 +1,11 @@
+# Streamlit theme — soccer pitch palette.
+# Widgets (inputs, dataframes, alerts) pick these colors up automatically;
+# the stripe backdrop and card styling are layered on via CSS in app.py.
+
+[theme]
+base = "dark"
+primaryColor = "#34d399"             # grass-green accent (buttons, focus rings)
+backgroundColor = "#0e4423"          # deep pitch green
+secondaryBackgroundColor = "#0b3119" # darker green (inputs, sidebar, cards)
+textColor = "#f2fbf4"
+font = "sans serif"

@@ -41,11 +41,90 @@ load_dotenv()
 st.set_page_config(page_title="Transfer Market Game", page_icon="⚽", layout="wide")
 
 # ---------------------------------------------------------------------------
+# Pitch theme — global CSS, purely visual. Base palette lives in
+# .streamlit/config.toml; this layers the mowed-stripe backdrop and
+# card/button styling on top.
+# ---------------------------------------------------------------------------
+
+_PITCH_CSS = """
+<style>
+/* Mowed-stripe pitch backdrop behind the whole app */
+.stApp {
+    background:
+        repeating-linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.030) 0px,
+            rgba(255, 255, 255, 0.030) 90px,
+            rgba(0, 0, 0, 0.060) 90px,
+            rgba(0, 0, 0, 0.060) 180px
+        ),
+        radial-gradient(ellipse at 50% -10%, #1d7a43 0%, #0e4423 55%, #08311a 100%);
+    background-attachment: fixed;
+}
+
+/* Sidebar = the dugout */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #06200f 0%, #0b3119 100%);
+    border-right: 2px solid rgba(52, 211, 153, 0.45);
+}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] > label {
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 8px;
+    transition: background 0.15s ease;
+}
+[data-testid="stSidebar"] .stRadio div[role="radiogroup"] > label:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+/* Metrics as scoreboard cards */
+[data-testid="stMetric"] {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-left: 4px solid #34d399;
+    border-radius: 12px;
+    padding: 12px 16px;
+}
+
+/* Forms and expanders as cards */
+[data-testid="stForm"] {
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: 12px;
+}
+[data-testid="stExpander"] details {
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 12px;
+}
+
+/* Rounded, bolder buttons */
+.stButton > button, [data-testid="stFormSubmitButton"] > button {
+    border-radius: 999px;
+    font-weight: 600;
+}
+
+/* White pitch-line underline beneath page headers */
+h2 {
+    border-bottom: 2px solid rgba(255, 255, 255, 0.25);
+    padding-bottom: 6px;
+}
+
+hr {
+    border-color: rgba(255, 255, 255, 0.15);
+}
+</style>
+"""
+
+st.markdown(_PITCH_CSS, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
 # Temporary banner — remove or set SHOW_BANNER = False to hide
 # ---------------------------------------------------------------------------
 SHOW_BANNER = True
-BANNER_TEXT = "🎉🎓 Congrats Grad!! (Lila) 🤓💥🎊"
-BANNER_COLOR = "#ff69b4"  # hot pink — change this hex to recolor
+BANNER_TEXT = "🏀 Lets go Knicks! 🗽"
+BANNER_COLOR = "#006BB6"   # Knicks blue — change this hex to recolor
+BANNER_BORDER = "#F58426"  # Knicks orange
 
 if SHOW_BANNER:
     st.markdown(
@@ -58,6 +137,7 @@ if SHOW_BANNER:
             font-size: 1.4rem;
             font-weight: bold;
             border-radius: 8px;
+            border: 3px solid {BANNER_BORDER};
             margin-bottom: 12px;
             letter-spacing: 0.03em;
         ">
@@ -104,7 +184,31 @@ except Exception:
 # Auth gate — nothing below renders until the user is logged in
 # ---------------------------------------------------------------------------
 
-st.title("Fantasy Clearlake Capital")
+# Hero header drawn as a pitch: stripes, halfway line, and center circle
+st.markdown(
+    """
+    <div style="position:relative; overflow:hidden; border-radius:14px;
+                border:2px solid rgba(255,255,255,0.35);
+                background:
+                  repeating-linear-gradient(90deg,
+                    rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 70px,
+                    rgba(0,0,0,0.07) 70px, rgba(0,0,0,0.07) 140px),
+                  linear-gradient(160deg, #15803d 0%, #166534 60%, #14532d 100%);
+                padding: 26px 30px; margin-bottom: 14px;">
+      <div style="position:absolute; top:50%; left:50%; width:130px; height:130px;
+                  border:2px solid rgba(255,255,255,0.35); border-radius:50%;
+                  transform:translate(-50%,-50%);"></div>
+      <div style="position:absolute; top:0; bottom:0; left:50%; width:2px;
+                  background:rgba(255,255,255,0.35);"></div>
+      <h1 style="position:relative; margin:0; color:#ffffff; text-align:center;
+                 font-size:2.2rem; letter-spacing:0.04em;
+                 text-shadow:0 2px 8px rgba(0,0,0,0.45);">
+        ⚽ Fantasy Clearlake Capital
+      </h1>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 auth.require_login(conn)
 
 # From here on, auth.current_user() is guaranteed to be set.
@@ -204,7 +308,7 @@ def fmt_delta(value: int) -> str:
 
 def colored_delta(value: int) -> str:
     """Return an HTML span with green/red/grey coloring for a euro delta."""
-    color = "#2ea043" if value > 0 else "#f85149" if value < 0 else "#888888"
+    color = "#2ea043" if value > 0 else "#f85149" if value < 0 else "#9fc1ab"
     return f'<span style="color:{color}">{fmt_delta(value)}</span>'
 
 
@@ -286,7 +390,7 @@ def page_leaderboard():
                         delta = player["current_value"] - last_player_values[player["id"]]
                         milestone_html = f" · vs milestone: {colored_delta(delta)}"
                     elif last_milestone_info:
-                        milestone_html = ' · vs milestone: <span style="color:#888888">New</span>'
+                        milestone_html = ' · vs milestone: <span style="color:#9fc1ab">New</span>'
 
                     _sub = player_subtitle(player)
                     st.markdown(
@@ -367,7 +471,7 @@ def page_my_team():
                 delta = player["current_value"] - last_player_values[player["id"]]
                 milestone_html = f"  · vs milestone: {colored_delta(delta)}"
             elif last_milestone_info:
-                milestone_html = '  · vs milestone: <span style="color:#888888">New</span>'
+                milestone_html = '  · vs milestone: <span style="color:#9fc1ab">New</span>'
 
             _sub = player_subtitle(player)
             st.markdown(
@@ -895,7 +999,7 @@ def page_feed():
             col1, col2 = st.columns([5, 1])
             with col2:
                 st.markdown(
-                    f"<span style='color:gray;font-size:0.85em'>{time_str}</span>",
+                    f"<span style='color:#9fc1ab;font-size:0.85em'>{time_str}</span>",
                     unsafe_allow_html=True,
                 )
 
@@ -908,7 +1012,7 @@ def page_feed():
                     subtitle = f"{_h(e['player_club'])} · {_h(e['player_position'])}"
                     st.markdown(
                         f"{action_icon} **{_h(e['participant_name'])}** {action_word} "
-                        f"**{_h(e['player_name'])}** <span style='color:gray;font-size:0.85em'>({subtitle})</span> "
+                        f"**{_h(e['player_name'])}** <span style='color:#9fc1ab;font-size:0.85em'>({subtitle})</span> "
                         f"for **{value_str}**",
                         unsafe_allow_html=True,
                     )
@@ -923,7 +1027,7 @@ def page_feed():
                     if status == "pending":
                         st.markdown(
                             f"🔄 **{sender}** proposed a trade with **{receiver}**  \n"
-                            f"<span style='color:gray;font-size:0.85em'>"
+                            f"<span style='color:#9fc1ab;font-size:0.85em'>"
                             f"{sender} gives: {sg_str} · {receiver} gives: {rg_str} · "
                             f"<em>Awaiting response</em></span>",
                             unsafe_allow_html=True,
@@ -931,7 +1035,7 @@ def page_feed():
                     elif status == "accepted":
                         st.markdown(
                             f"✅ **{sender}** and **{receiver}** completed a trade  \n"
-                            f"<span style='color:gray;font-size:0.85em'>"
+                            f"<span style='color:#9fc1ab;font-size:0.85em'>"
                             f"{sender} gave: {sg_str} · {receiver} gave: {rg_str}</span>",
                             unsafe_allow_html=True,
                         )
@@ -1546,7 +1650,7 @@ def _event_label(event: dict) -> str:
         if val:
             detail = f" — entered at {val}"
 
-    return f"{icon} **{et}**{detail}  \n<span style='color:gray;font-size:0.82em'>{ts}</span>"
+    return f"{icon} **{et}**{detail}  \n<span style='color:#9fc1ab;font-size:0.82em'>{ts}</span>"
 
 
 def page_player_dashboard():
@@ -1644,6 +1748,9 @@ def page_player_dashboard():
                 hovermode="x unified",
                 margin=dict(l=0, r=0, t=10, b=0),
                 height=380,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
             )
             fig.update_yaxes(tickprefix="€")
             st.plotly_chart(fig, use_container_width=True)
